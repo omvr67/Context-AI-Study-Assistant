@@ -1,7 +1,15 @@
-# Local environment variables and secrets
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Environment variables
 .env
 .env.*
 !.env.example
-__pycache__/
-*.pyc
-.venv/
