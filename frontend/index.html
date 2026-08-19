@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Syllabus & Exam Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Roboto+Slab:wght@600;700&family=Inter:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <h1 class="wordmark">Syllabus<br />&amp; Exam<br />Assistant</h1>
+      <p class="rail-caption">ConnectX Final Project &middot; Grounded RAG + Tools</p>
+
+      <div class="course-list" id="courseList">
+        <p class="loading">Loading courses&hellip;</p>
+      </div>
+
+      <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
+    </aside>
+
+    <main class="deck">
+      <header class="deck-header">
+        <span class="tab" id="activeCourseTab">All courses</span>
+      </header>
+
+      <div class="thread" id="thread">
+        <div class="card assistant">
+          <p>
+            Hi — I'm grounded strictly in the syllabi on the left. Ask me about grading, exam
+            dates, attendance, GPA projections, or ask me to build you a study plan.
+          </p>
+        </div>
+      </div>
+
+      <form class="composer" id="composer">
+        <input
+          id="messageInput"
+          type="text"
+          placeholder="Ask about a policy, your GPA, or a study plan…"
+          autocomplete="off"
+        />
+        <button type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
