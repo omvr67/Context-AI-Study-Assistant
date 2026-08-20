@@ -21,7 +21,7 @@ from .tools import make_tools
 # ---------------------------------------------------------------------------
 # Startup: build the vector store, tools, and agent once when the app boots.
 # ---------------------------------------------------------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError(
         "GROQ_API_KEY is not set. Export it before starting the server, e.g.\n"
