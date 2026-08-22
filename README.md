@@ -1,4 +1,4 @@
-# Syllabus & Exam Assistant — Scaffold
+# Syllabus & Exam Assistant 
 
 ConnectX Final Project #5: Grounded RAG + GPA/study-plan calculators + multi-turn memory.
 

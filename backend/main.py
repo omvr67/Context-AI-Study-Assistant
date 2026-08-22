@@ -8,15 +8,17 @@ plain FastAPI() app instance. Run from the project root with:
  To actiate -->  uvicorn backend.main:app --reload --port 8000
 """
 import os
+
+
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware #connects the front and back ends in browser
 from langchain_groq import ChatGroq
 
 from .agent import SyllabusAssistantAgent
 from .data import SYLLABUS_DOCUMENTS
 from .models import ChatRequest, ChatResponse, CourseInfo
-from .rag import build_syllabus_vectorstore
-from .tools import make_tools
+from .rag import build_syllabus_vectorstore # creates FAISS vector store
+from .tools import make_tools #imports function that creates the tools used
 
 # ---------------------------------------------------------------------------
 # Startup: build the vector store, tools, and agent once when the app boots.
@@ -28,7 +30,10 @@ if not GROQ_API_KEY:
         "  export GROQ_API_KEY='your_key_here'"
     )
 
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0, api_key=GROQ_API_KEY)
+llm = ChatGroq( #creates the LM interface
+    model="openai/gpt-oss-120b",
+    temperature=0.0,
+    api_key=GROQ_API_KEY)
 vectorstore = build_syllabus_vectorstore()
 tools = make_tools(vectorstore)
 agent = SyllabusAssistantAgent(llm=llm, tools=tools)
@@ -44,6 +49,7 @@ app.add_middleware(
 )
 
 
+#Backend security check
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "syllabus-exam-assistant"}
@@ -58,6 +64,7 @@ def list_courses():
     return [CourseInfo(course_code=c, course_name=n) for c, n in seen.items()]
 
 
+#This is where the frontend sends the users messages
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if not req.message.strip():
@@ -71,6 +78,7 @@ def chat(req: ChatRequest):
     return ChatResponse(session_id=req.session_id, response=reply)
 
 
+#Deletes the session
 @app.delete("/chat/{session_id}")
 def reset_session(session_id: str):
     agent.reset(session_id)

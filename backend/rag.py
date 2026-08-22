@@ -23,15 +23,15 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 def build_syllabus_vectorstore(chunk_size: int = 400, chunk_overlap: int = 60) -> FAISS:
     """Splits syllabus documents and indexes them into an in-memory FAISS store."""
-    splitter = RecursiveCharacterTextSplitter(
+    splitter = RecursiveCharacterTextSplitter( #Specify how the text will be split
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
-    chunks = splitter.split_documents(SYLLABUS_DOCUMENTS)
+    chunks = splitter.split_documents(SYLLABUS_DOCUMENTS) #Splits the text
 
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-    return vectorstore
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL) #Creates embeddings
+    vectorstore = FAISS.from_documents(chunks, embeddings) #Builds FAISS vectorstore
+    return vectorstore #Send the vectorstore to main
 
 
 def format_docs(docs) -> str:
