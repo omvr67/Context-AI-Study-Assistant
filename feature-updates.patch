@@ -1,0 +1,1303 @@
+diff --git a/.gitignore b/.gitignore
+index b81e283..ab46265 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,9 @@ __pycache__/
+ .env
+ .env.*
+ !.env.example
++
++# Locally-added syllabi (per-student, not part of the shared demo data)
++backend/custom_syllabi.json
++
++# Locally added syllabi (per-student, not part of the demo dataset)
++backend/custom_syllabi.json
+diff --git a/backend/agent.py b/backend/agent.py
+index cb0025c..db9d49c 100644
+--- a/backend/agent.py
++++ b/backend/agent.py
+@@ -6,10 +6,25 @@ Architecture mirrors Session 3's MemoryAugmentedAgentExecutor
+ (SystemMessage / HumanMessage / AIMessage / ToolMessage + .bind_tools()),
+ generalized to serve multiple concurrent chat sessions behind a FastAPI
+ backend instead of a single notebook-global chat_history list.
++
++On top of the base loop, this version:
++  - tags each incoming message with a lightweight, no-LLM-call intent
++    hint so the model leans toward the right tool instead of reflexively
++    calling search_syllabus for GPA/schedule questions;
++  - tracks which tools fired and, for search_syllabus specifically, which
++    syllabus chunks were actually retrieved, so the API layer can report
++    whether an answer was grounded and show its sources;
++  - exposes summarize() so a session can get a short recap right before
++    it's reset instead of just vanishing.
+ """
++import re
++
+ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+ 
+-GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant, a study companion for enrolled students.
++GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant -- a sharp, encouraging
++study partner for enrolled students, not a generic chatbot. Be confident, concise, and specific;
++when you cite a policy, weave the course code naturally into the sentence (e.g. "CS301's final is
++worth 35% of your grade") instead of just tagging it on at the end.
+ 
+ Rules you must always follow:
+ 1. For any question about grading breakdowns, exam dates, attendance policy, or lecture topics, call the
+@@ -18,18 +33,67 @@ Rules you must always follow:
+    exactly with: "I don't see that in the syllabus -- please check with your Teaching Assistant." Do not
+    guess or fall back on outside knowledge.
+ 3. When a student asks about their GPA or how a grade would affect it, call the gpa_impact_simulator tool
+-   rather than doing the arithmetic yourself.
+-4. When a student asks for a study plan or revision schedule, first use search_syllabus to find the
+-   relevant lecture topics if they weren't already given to you, then call generate_study_schedule with
+-   those topics.
+-5. Keep answers concise and cite the course code (e.g. "[CS301]") when quoting a policy.
++   directly -- don't call search_syllabus first unless they're also asking about a specific course policy.
++   Never do GPA arithmetic yourself.
++4. When a student asks for a study plan or revision schedule: first call search_syllabus to find the
++   relevant lecture topics AND the grading breakdown if you don't already have them, then call
++   generate_study_schedule with those topics -- and whenever the grading breakdown gives you percentages
++   for the relevant exam/topics, pass them as topic_weights so heavier-weighted material gets more days.
++5. Messages may start with a bracketed hint like "[Likely tool: ...]" -- treat it as a suggestion from
++   the interface, not a hard rule. Use your own judgment about which tool actually fits the question.
++6. Keep answers concise.
+ """
+ 
++SUMMARY_SYSTEM_PROMPT = """Summarize the conversation below in exactly 3 short lines, each starting with
++a dash. Focus on what the student asked and what was found or calculated. No preamble, no closing remarks."""
++
++_GPA_KEYWORDS = ("gpa", "grade point", "cumulative average", "what would my grade", "my grade be")
++_SCHEDULE_KEYWORDS = (
++    "study plan", "study schedule", "revision plan", "revise for",
++    "how should i study", "days until", "prepare for", "cram",
++)
++
++
++def _intent_hint(user_input: str) -> str | None:
++    """Cheap keyword heuristic -- no LLM call -- that nudges tool choice for
++    the current turn without hard-coding it. Returns None when nothing
++    obvious matches, letting the model decide freely.
++    """
++    text = user_input.lower()
++    if any(k in text for k in _GPA_KEYWORDS):
++        return "gpa_impact_simulator (this reads like a GPA question, not a syllabus lookup)"
++    if any(k in text for k in _SCHEDULE_KEYWORDS):
++        return "generate_study_schedule (this reads like a study-planning question)"
++    return None
++
++
++def _parse_sources(observation: str) -> list[dict]:
++    """Pulls {course_code, snippet} pairs back out of format_docs()'s
++    "[CODE] content" blocks so the API layer can report exactly what
++    grounded an answer, without search_syllabus needing to know about
++    HTTP responses at all.
++    """
++    if observation.startswith("NOT_FOUND") or observation.startswith("Syllabus search error"):
++        return []
++
++    sources = []
++    for block in observation.split("\n\n"):
++        block = block.strip()
++        match = re.match(r"^\[([^\]]+)\]\s*(.*)$", block, re.DOTALL)
++        if not match:
++            continue
++        code, snippet = match.group(1).strip(), match.group(2).strip()
++        if len(snippet) > 220:
++            snippet = snippet[:220].rsplit(" ", 1)[0] + "\u2026"
++        sources.append({"course_code": code, "snippet": snippet})
++    return sources
++
+ 
+ class SyllabusAssistantAgent:
+     """Wraps an LLM + tool set with independent chat history per session_id."""
+ 
+     def __init__(self, llm, tools, system_prompt: str = GUARDRAIL_SYSTEM_PROMPT, max_turns: int = 5):
++        self.llm = llm  # kept tool-free for summarize()
+         self.tools_map = {t.name: t for t in tools}
+         self.llm_with_tools = llm.bind_tools(tools)
+         self.system_prompt = system_prompt
+@@ -45,27 +109,85 @@ class SyllabusAssistantAgent:
+         """Clears a session's memory; the next turn starts a fresh SystemMessage."""
+         self._sessions.pop(session_id, None)
+ 
+-    def chat(self, session_id: str, user_input: str) -> str:
++    def summarize(self, session_id: str) -> str | None:
++        """Generates a short recap of a session before it's reset. Returns
++        None if the session doesn't exist yet or nothing was actually said.
++        """
++        history = self._sessions.get(session_id)
++        if not history or len(history) <= 1:
++            return None
++
++        transcript_lines = []
++        for msg in history:
++            if isinstance(msg, HumanMessage) and msg.content:
++                transcript_lines.append(f"Student: {msg.content}")
++            elif isinstance(msg, AIMessage) and msg.content:
++                transcript_lines.append(f"Assistant: {msg.content}")
++        if not transcript_lines:
++            return None
++
++        transcript = "\n".join(transcript_lines)[-4000:]  # keep the summarizer prompt small
++        try:
++            summary_msg = self.llm.invoke([
++                SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
++                HumanMessage(content=transcript),
++            ])
++            return summary_msg.content.strip() or None
++        except Exception:
++            return None
++
++    def chat(self, session_id: str, user_input: str) -> dict:
++        """Runs one turn of the ReAct loop.
++
++        Returns {"content": str, "sources": list[dict], "tools_used": list[str]}
++        instead of a bare string so the API layer can surface grounding
++        info and which tools actually fired for this turn.
++        """
+         history = self._history(session_id)
+-        history.append(HumanMessage(content=user_input))
++
++        hint = _intent_hint(user_input)
++        tagged_input = f"[Likely tool: {hint}] {user_input}" if hint else user_input
++        history.append(HumanMessage(content=tagged_input))
++
++        tools_used: list[str] = []
++        sources: list[dict] = []
+ 
+         for _ in range(self.max_turns):
+             try:
+                 ai_msg: AIMessage = self.llm_with_tools.invoke(history)
+             except Exception as e:
+-                return f"Sorry, I hit an error talking to the model: {e}"
++                return {
++                    "content": f"Sorry, I hit an error talking to the model: {e}",
++                    "sources": [],
++                    "tools_used": [],
++                }
+ 
+             history.append(ai_msg)
+ 
+             if not getattr(ai_msg, "tool_calls", None):
+-                return ai_msg.content
++                return {"content": ai_msg.content, "sources": _dedupe_sources(sources), "tools_used": tools_used}
+ 
+             for tool_call in ai_msg.tool_calls:
+-                tool_obj = self.tools_map.get(tool_call["name"])
++                name = tool_call["name"]
++                tool_obj = self.tools_map.get(name)
+                 if tool_obj is None:
+-                    observation = f"Error: tool '{tool_call['name']}' is not registered."
++                    observation = f"Error: tool '{name}' is not registered."
+                 else:
+                     observation = tool_obj.invoke(tool_call["args"])
++                    tools_used.append(name)
++                    if name == "search_syllabus":
++                        sources.extend(_parse_sources(str(observation)))
+                 history.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
+ 
+-        return "I'm having trouble finishing that request -- could you rephrase or ask one thing at a time?"
++        return {
++            "content": "I'm having trouble finishing that request -- could you rephrase or ask one thing at a time?",
++            "sources": _dedupe_sources(sources),
++            "tools_used": tools_used,
++        }
++
++
++def _dedupe_sources(sources: list[dict]) -> list[dict]:
++    seen = {}
++    for s in sources:
++        seen[(s["course_code"], s["snippet"])] = s
++    return list(seen.values())
+diff --git a/backend/custom_courses.py b/backend/custom_courses.py
+new file mode 100644
+index 0000000..d705ee1
+--- /dev/null
++++ b/backend/custom_courses.py
+@@ -0,0 +1,56 @@
++"""
++Local persistence for user-added syllabi.
++
++Courses added through POST /courses live in a small JSON file next to
++this module -- no database needed at this scale. On every server
++restart, `rag.build_syllabus_vectorstore()` reads this file and
++re-embeds whatever's here alongside the three hardcoded syllabi, so
++anything a student adds sticks around for next time.
++
++Each stored record is wrapped into the exact same Document shape
++(page_content + course_code/course_name metadata) as the hardcoded
++syllabi in data.py, so the RAG pipeline can't tell custom syllabi
++apart from built-in ones at query time.
++"""
++import json
++from pathlib import Path
++
++STORE_PATH = Path(__file__).parent / "custom_syllabi.json"
++
++
++def load_custom_courses() -> list[dict]:
++    """Returns [] if nothing has been added yet or the file is unreadable."""
++    if not STORE_PATH.exists():
++        return []
++    try:
++        with STORE_PATH.open("r", encoding="utf-8") as f:
++            data = json.load(f)
++        return data if isinstance(data, list) else []
++    except (json.JSONDecodeError, OSError):
++        return []
++
++
++def save_custom_courses(courses: list[dict]) -> None:
++    with STORE_PATH.open("w", encoding="utf-8") as f:
++        json.dump(courses, f, indent=2)
++
++
++def add_custom_course(course_code: str, course_name: str, content: str) -> None:
++    """Adds a course, replacing any earlier version saved under the same code."""
++    courses = [c for c in load_custom_courses() if c["course_code"] != course_code]
++    courses.append({
++        "course_code": course_code,
++        "course_name": course_name,
++        "content": content,
++    })
++    save_custom_courses(courses)
++
++
++def remove_custom_course(course_code: str) -> bool:
++    """Returns True if a course was actually removed."""
++    courses = load_custom_courses()
++    remaining = [c for c in courses if c["course_code"] != course_code]
++    if len(remaining) == len(courses):
++        return False
++    save_custom_courses(remaining)
++    return True
+diff --git a/backend/main.py b/backend/main.py
+index 898f916..cb73fb1 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -9,16 +9,23 @@ plain FastAPI() app instance. Run from the project root with:
+ """
+ import os
+ 
+-
+-from fastapi import FastAPI, HTTPException
+-from fastapi.middleware.cors import CORSMiddleware #connects the front and back ends in browser
++from fastapi import FastAPI, HTTPException, Query
++from fastapi.middleware.cors import CORSMiddleware  # connects the front and back ends in browser
+ from langchain_groq import ChatGroq
+ 
+ from .agent import SyllabusAssistantAgent
++from .custom_courses import add_custom_course, load_custom_courses, remove_custom_course
+ from .data import SYLLABUS_DOCUMENTS
+-from .models import ChatRequest, ChatResponse, CourseInfo
+-from .rag import build_syllabus_vectorstore # creates FAISS vector store
+-from .tools import make_tools #imports function that creates the tools used
++from .models import (
++    AddCourseRequest,
++    ChatRequest,
++    ChatResponse,
++    CourseInfo,
++    ResetResponse,
++    SourceChunk,
++)
++from .rag import add_course_to_vectorstore, build_syllabus_vectorstore, remove_course_from_vectorstore
++from .tools import make_tools  # imports function that creates the tools used
+ 
+ # ---------------------------------------------------------------------------
+ # Startup: build the vector store, tools, and agent once when the app boots.
+@@ -30,14 +37,19 @@ if not GROQ_API_KEY:
+         "  export GROQ_API_KEY='your_key_here'"
+     )
+ 
+-llm = ChatGroq( #creates the LM interface
++llm = ChatGroq(  # creates the LM interface
+     model="openai/gpt-oss-120b",
+     temperature=0.0,
+     api_key=GROQ_API_KEY)
+-vectorstore = build_syllabus_vectorstore()
++
++# vectorstore starts loaded with the 3 hardcoded syllabi *and* anything a
++# student has already saved locally via POST /courses on a previous run.
++vectorstore, course_chunk_ids = build_syllabus_vectorstore()
+ tools = make_tools(vectorstore)
+ agent = SyllabusAssistantAgent(llm=llm, tools=tools)
+ 
++BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
++
+ app = FastAPI(title="ConnectX Syllabus & Exam Assistant")
+ 
+ # Wide-open CORS for local development against the vanilla-JS frontend.
+@@ -49,22 +61,77 @@ app.add_middleware(
+ )
+ 
+ 
+-#Backend security check
++def _course_registry() -> dict[str, dict]:
++    """course_code -> {course_name, custom} for every indexed course, base + custom."""
++    registry: dict[str, dict] = {}
++    for doc in SYLLABUS_DOCUMENTS:
++        registry[doc.metadata["course_code"]] = {"course_name": doc.metadata["course_name"], "custom": False}
++    for course in load_custom_courses():
++        registry[course["course_code"]] = {"course_name": course["course_name"], "custom": True}
++    return registry
++
++
++# Backend security check
+ @app.get("/")
+ def health_check():
+-    return {"status": "ok", "service": "syllabus-exam-assistant"}
++    return {
++        "status": "ok",
++        "service": "syllabus-exam-assistant",
++        "courses_indexed": len(course_chunk_ids),
++    }
+ 
+ 
+ @app.get("/courses", response_model=list[CourseInfo])
+ def list_courses():
+-    seen = {}
+-    for doc in SYLLABUS_DOCUMENTS:
+-        code = doc.metadata["course_code"]
+-        seen[code] = doc.metadata["course_name"]
+-    return [CourseInfo(course_code=c, course_name=n) for c, n in seen.items()]
++    registry = _course_registry()
++    return [
++        CourseInfo(course_code=code, course_name=info["course_name"], custom=info["custom"])
++        for code, info in registry.items()
++    ]
++
++
++@app.post("/courses", response_model=CourseInfo, status_code=201)
++def add_course(req: AddCourseRequest):
++    code = req.course_code.strip().upper()
++    name = req.course_name.strip()
++    content = req.content.strip()
+ 
++    if not code or not name or not content:
++        raise HTTPException(status_code=422, detail="course_code, course_name, and content are all required")
++    if code in BASE_COURSE_CODES:
++        raise HTTPException(status_code=409, detail=f"'{code}' is a built-in course and can't be overwritten")
++    if len(content) < 30:
++        raise HTTPException(status_code=422, detail="content is too short to be a usable syllabus")
+ 
+-#This is where the frontend sends the users messages
++    # If this code was already saved before, drop its old chunks first so a
++    # re-add fully replaces it instead of leaving stale duplicates indexed.
++    if code in course_chunk_ids:
++        remove_course_from_vectorstore(vectorstore, course_chunk_ids.pop(code, []))
++
++    new_ids = add_course_to_vectorstore(vectorstore, code, name, content)
++    course_chunk_ids[code] = new_ids
++    add_custom_course(code, name, content)
++
++    return CourseInfo(course_code=code, course_name=name, custom=True)
++
++
++@app.delete("/courses/{course_code}")
++def delete_course(course_code: str):
++    code = course_code.strip().upper()
++    if code in BASE_COURSE_CODES:
++        raise HTTPException(status_code=403, detail="Built-in courses can't be deleted")
++
++    ids = course_chunk_ids.pop(code, None)
++    removed_from_disk = remove_custom_course(code)
++    if ids is None and not removed_from_disk:
++        raise HTTPException(status_code=404, detail=f"No custom course '{code}' found")
++
++    if ids:
++        remove_course_from_vectorstore(vectorstore, ids)
++    return {"status": "deleted", "course_code": code}
++
++
++# This is where the frontend sends the users messages
+ @app.post("/chat", response_model=ChatResponse)
+ def chat(req: ChatRequest):
+     if not req.message.strip():
+@@ -74,12 +141,19 @@ def chat(req: ChatRequest):
+     if req.course_code:
+         user_input = f"[Course context: {req.course_code}] {user_input}"
+ 
+-    reply = agent.chat(session_id=req.session_id, user_input=user_input)
+-    return ChatResponse(session_id=req.session_id, response=reply)
++    result = agent.chat(session_id=req.session_id, user_input=user_input)
++    return ChatResponse(
++        session_id=req.session_id,
++        response=result["content"],
++        grounded=bool(result["sources"]),
++        sources=[SourceChunk(**s) for s in result["sources"]],
++        tools_used=result["tools_used"],
++    )
+ 
+ 
+-#Deletes the session
+-@app.delete("/chat/{session_id}")
+-def reset_session(session_id: str):
++# Resets the session, optionally returning a short recap first
++@app.delete("/chat/{session_id}", response_model=ResetResponse)
++def reset_session(session_id: str, summarize: bool = Query(False)):
++    summary = agent.summarize(session_id) if summarize else None
+     agent.reset(session_id)
+-    return {"status": "reset", "session_id": session_id}
++    return ResetResponse(status="reset", session_id=session_id, summary=summary)
+diff --git a/backend/models.py b/backend/models.py
+index 1bc1747..c9a4bf3 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -12,11 +12,32 @@ class ChatRequest(BaseModel):
+     course_code: str | None = None
+ 
+ 
++class SourceChunk(BaseModel):
++    course_code: str
++    snippet: str
++
++
+ class ChatResponse(BaseModel):
+     session_id: str
+     response: str
++    grounded: bool = False
++    sources: list[SourceChunk] = []
++    tools_used: list[str] = []
+ 
+ 
+ class CourseInfo(BaseModel):
+     course_code: str
+     course_name: str
++    custom: bool = False
++
++
++class AddCourseRequest(BaseModel):
++    course_code: str
++    course_name: str
++    content: str
++
++
++class ResetResponse(BaseModel):
++    status: str
++    session_id: str
++    summary: str | None = None
+diff --git a/backend/rag.py b/backend/rag.py
+index 0d245df..e3885f9 100644
+--- a/backend/rag.py
++++ b/backend/rag.py
+@@ -3,10 +3,17 @@ Vector store setup for the Syllabus & Exam Assistant.
+ 
+ Mirrors the grounded-RAG pipeline from Assignment 2 (Exercises 3 & 4):
+ RecursiveCharacterTextSplitter -> HuggingFaceEmbeddings -> FAISS.
+-The only difference is chunk_size, tuned a bit larger here so each
++chunk_size is tuned a bit larger than the assignment default so each
+ chunk keeps a whole syllabus section (e.g. the full grading breakdown)
+ together instead of splitting it mid-sentence.
++
++On top of the base pipeline, this module also indexes any locally
++saved custom syllabi (see custom_courses.py) at startup, and exposes
++add_course_to_vectorstore / remove_course_from_vectorstore so the
++/courses POST and DELETE endpoints can update the live FAISS index
++in place -- no full rebuild needed for either operation.
+ """
++from langchain_core.documents import Document
+ from langchain_text_splitters import RecursiveCharacterTextSplitter
+ 
+ try:
+@@ -16,22 +23,86 @@ except ImportError:
+ 
+ from langchain_community.vectorstores import FAISS
+ 
++from .custom_courses import load_custom_courses
+ from .data import SYLLABUS_DOCUMENTS
+ 
+ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
++CHUNK_SIZE = 400
++CHUNK_OVERLAP = 60
++
++
++def _splitter() -> RecursiveCharacterTextSplitter:
++    return RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
++
++
++def build_syllabus_vectorstore() -> tuple[FAISS, dict[str, list[str]]]:
++    """Builds the FAISS store from the hardcoded syllabi plus any locally
++    saved custom syllabi (see custom_courses.py).
++
++    Returns (vectorstore, course_chunk_ids) where course_chunk_ids maps
++    each course_code to the FAISS ids of its chunks, so a single course
++    can later be removed with vectorstore.delete(ids) instead of a full
++    rebuild.
++    """
++    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
++    splitter = _splitter()
++    course_chunk_ids: dict[str, list[str]] = {}
++    vectorstore: FAISS | None = None
+ 
++    def _index(documents: list[Document]) -> None:
++        nonlocal vectorstore
++        chunks = splitter.split_documents(documents)
++        if not chunks:
++            return
++        if vectorstore is None:
++            vectorstore = FAISS.from_documents(chunks, embeddings)
++            # from_documents doesn't hand back ids directly, but the wrapper
++            # builds this map in the same order the chunks were embedded.
++            new_ids = list(vectorstore.index_to_docstore_id.values())
++        else:
++            new_ids = vectorstore.add_documents(chunks)
++        for chunk, chunk_id in zip(chunks, new_ids):
++            code = chunk.metadata.get("course_code", "UNKNOWN")
++            course_chunk_ids.setdefault(code, []).append(chunk_id)
+ 
+-def build_syllabus_vectorstore(chunk_size: int = 400, chunk_overlap: int = 60) -> FAISS:
+-    """Splits syllabus documents and indexes them into an in-memory FAISS store."""
+-    splitter = RecursiveCharacterTextSplitter( #Specify how the text will be split
+-        chunk_size=chunk_size,
+-        chunk_overlap=chunk_overlap,
++    _index(SYLLABUS_DOCUMENTS)
++    for course in load_custom_courses():
++        _index([Document(
++            page_content=course["content"],
++            metadata={
++                "course_code": course["course_code"],
++                "course_name": course["course_name"],
++                "custom": True,
++            },
++        )])
++
++    if vectorstore is None:
++        # Should never happen -- SYLLABUS_DOCUMENTS is never empty -- but keep
++        # startup from crashing outright if data.py is ever emptied out.
++        vectorstore = FAISS.from_documents(
++            [Document(page_content="No syllabi indexed yet.", metadata={"course_code": "NONE"})],
++            embeddings,
++        )
++
++    return vectorstore, course_chunk_ids
++
++
++def add_course_to_vectorstore(vectorstore: FAISS, course_code: str, course_name: str, content: str) -> list[str]:
++    """Chunks + embeds one new syllabus and adds it to the live index.
++    Returns the new chunk ids so the caller can track them for later removal.
++    """
++    doc = Document(
++        page_content=content,
++        metadata={"course_code": course_code, "course_name": course_name, "custom": True},
+     )
+-    chunks = splitter.split_documents(SYLLABUS_DOCUMENTS) #Splits the text
++    chunks = _splitter().split_documents([doc])
++    return vectorstore.add_documents(chunks)
++
+ 
+-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL) #Creates embeddings
+-    vectorstore = FAISS.from_documents(chunks, embeddings) #Builds FAISS vectorstore
+-    return vectorstore #Send the vectorstore to main
++def remove_course_from_vectorstore(vectorstore: FAISS, chunk_ids: list[str]) -> None:
++    """Removes previously-tracked chunk ids from the live index in place."""
++    if chunk_ids:
++        vectorstore.delete(chunk_ids)
+ 
+ 
+ def format_docs(docs) -> str:
+diff --git a/backend/tools.py b/backend/tools.py
+index 645a0e5..1199e25 100644
+--- a/backend/tools.py
++++ b/backend/tools.py
+@@ -19,6 +19,58 @@ GRADE_POINTS = {
+ }
+ 
+ 
++def _parse_weights(topic_weights: str, n_topics: int) -> list[float]:
++    """Parses a comma-separated weight string parallel to the topic list.
++    Falls back to equal weights (1.0 each) for anything malformed --
++    wrong count, non-numeric, negative, or all-zero.
++    """
++    if not topic_weights.strip():
++        return [1.0] * n_topics
++    raw = [w.strip() for w in topic_weights.split(",") if w.strip()]
++    try:
++        values = [float(w) for w in raw]
++    except ValueError:
++        return [1.0] * n_topics
++    if len(values) != n_topics or any(v < 0 for v in values) or sum(values) == 0:
++        return [1.0] * n_topics
++    return values
++
++
++def _allocate_days(days_until_exam: int, weights: list[float]) -> list[int]:
++    """Largest-remainder allocation: hands out whole days to topics roughly
++    proportional to their weight, so heavier-weighted topics reliably get
++    more days than lighter ones instead of every topic getting an equal
++    round-robin slice.
++    """
++    n = len(weights)
++    total_weight = sum(weights)
++    raw_shares = [days_until_exam * (w / total_weight) for w in weights]
++
++    if days_until_exam >= n:
++        # Guarantee every topic at least one day when there's room for it.
++        base = [max(1, int(share)) for share in raw_shares]
++    else:
++        # Not enough days to cover every topic -- some may get zero.
++        base = [int(share) for share in raw_shares]
++
++    remainders = [share - int(share) for share in raw_shares]
++    order = sorted(range(n), key=lambda i: remainders[i], reverse=True)
++
++    remaining = days_until_exam - sum(base)
++    i = 0
++    while remaining > 0:
++        base[order[i % n]] += 1
++        remaining -= 1
++        i += 1
++    while sum(base) > days_until_exam:
++        idx = max(range(n), key=lambda i: base[i])
++        if base[idx] > 0:
++            base[idx] -= 1
++        else:
++            break
++    return base
++
++
+ def make_tools(vectorstore):
+     """
+     Builds the tool list for a given FAISS vectorstore.
+@@ -90,17 +142,26 @@ def make_tools(vectorstore):
+         topics: str,
+         days_until_exam: int,
+         hours_per_day: float = 2.0,
++        topic_weights: str = "",
+     ) -> str:
+         """Builds a day-by-day revision plan that spreads a list of exam
+         topics across the days remaining, allocating a fixed number of
+         study hours per day. If the topics aren't already known, call
+-        search_syllabus first to find the course's lecture topics.
++        search_syllabus first to find the course's lecture topics -- and,
++        if available, the grading breakdown, so heavier-weighted material
++        can get proportionally more days via topic_weights.
+ 
+         Args:
+             topics: Comma-separated lecture topics to revise, e.g.
+                 "Trees & BSTs, Hash Tables, Graphs & Traversal".
+             days_until_exam: Number of days left before the exam.
+             hours_per_day: Study hours available per day (default 2.0).
++            topic_weights: Optional comma-separated numbers, parallel to
++                topics, representing each topic's relative importance --
++                e.g. exam-section percentages pulled from the grading
++                breakdown like "40,35,25". Heavier-weighted topics get
++                proportionally more days. Leave empty to split days
++                evenly across topics.
+         """
+         topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+         if not topic_list:
+@@ -110,21 +171,28 @@ def make_tools(vectorstore):
+         if hours_per_day <= 0:
+             return "Error: hours_per_day must be a positive number."
+ 
++        weights = _parse_weights(topic_weights, len(topic_list))
++        day_counts = _allocate_days(days_until_exam, weights)
++        weighted = bool(topic_weights.strip()) and weights != [1.0] * len(topic_list)
++
+         total_hours = days_until_exam * hours_per_day
+-        hours_per_topic = total_hours / len(topic_list)
++        summary_lines = [
++            f"Study plan across {days_until_exam} day(s), {hours_per_day:g}h/day "
++            f"({total_hours:g}h total), {'weighted by exam importance' if weighted else 'split evenly'}:"
++        ]
++        for topic, day_count, weight in zip(topic_list, day_counts, weights):
++            share_pct = 100 * weight / sum(weights)
++            summary_lines.append(
++                f"  - {topic}: {day_count} day(s), {day_count * hours_per_day:g}h ({share_pct:.0f}% of plan)"
++            )
+ 
+-        # Cycle topics across the available days so every day has a focus block;
+-        # topics repeat if there are more days than topics, which is fine for revision.
+         schedule_lines = []
+-        for day in range(1, days_until_exam + 1):
+-            topic = topic_list[(day - 1) % len(topic_list)]
+-            schedule_lines.append(f"Day {day}: {topic} ({hours_per_day:g}h)")
++        day_number = 1
++        for topic, day_count in zip(topic_list, day_counts):
++            for _ in range(day_count):
++                schedule_lines.append(f"Day {day_number}: {topic} ({hours_per_day:g}h)")
++                day_number += 1
+ 
+-        summary = (
+-            f"Study plan across {days_until_exam} day(s), {hours_per_day:g}h/day "
+-            f"({total_hours:g}h total), ~{hours_per_topic:.1f}h per topic across "
+-            f"{len(topic_list)} topic(s):\n"
+-        )
+-        return summary + "\n".join(schedule_lines)
++        return "\n".join(summary_lines) + "\n\n" + "\n".join(schedule_lines)
+ 
+     return [search_syllabus, gpa_impact_simulator, generate_study_schedule]
+diff --git a/frontend/app.js b/frontend/app.js
+index 396057f..2350377 100644
+--- a/frontend/app.js
++++ b/frontend/app.js
+@@ -10,6 +10,28 @@ const courseList = document.getElementById("courseList");
+ const activeCourseTab = document.getElementById("activeCourseTab");
+ const resetBtn = document.getElementById("resetBtn");
+ 
++const addCourseBtn = document.getElementById("addCourseBtn");
++const addCourseForm = document.getElementById("addCourseForm");
++const cancelAddCourse = document.getElementById("cancelAddCourse");
++const addCourseStatus = document.getElementById("addCourseStatus");
++const newCourseCode = document.getElementById("newCourseCode");
++const newCourseName = document.getElementById("newCourseName");
++const newCourseContent = document.getElementById("newCourseContent");
++
++// Rotated randomly so repeated questions don't feel like a canned response.
++const THINKING_PHRASES = [
++  "Checking the syllabus…",
++  "Thinking it through…",
++  "Running the numbers…",
++  "Working on it…",
++];
++
++const TOOL_LABELS = {
++  search_syllabus: "📖 Searched syllabus",
++  gpa_impact_simulator: "🧮 Calculated GPA",
++  generate_study_schedule: "🗓️ Built a schedule",
++};
++
+ function renderMarkdown(text) {
+   const escaped = text
+     .replace(/&/g, "&amp;")
+@@ -30,12 +52,69 @@ function addCard(role, text) {
+   return card;
+ }
+ 
++function addThinkingCard() {
++  const phrase = THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)];
++  const card = document.createElement("div");
++  card.className = "card assistant thinking";
++  card.innerHTML = `<span class="thinking-text">${phrase}</span><span class="dots"><span></span><span></span><span></span></span>`;
++  thread.appendChild(card);
++  thread.scrollTop = thread.scrollHeight;
++  return card;
++}
++
++function addAssistantCard(data) {
++  const card = document.createElement("div");
++  card.className = "card assistant";
++  card.innerHTML = renderMarkdown(data.response);
++
++  const meta = document.createElement("div");
++  meta.className = "card-meta";
++
++  if (data.grounded) {
++    const badge = document.createElement("span");
++    badge.className = "badge grounded";
++    badge.textContent = "✓ Grounded in syllabus";
++    meta.appendChild(badge);
++  }
++
++  (data.tools_used || []).forEach((name) => {
++    const tag = document.createElement("span");
++    tag.className = "badge tool";
++    tag.textContent = TOOL_LABELS[name] || name;
++    meta.appendChild(tag);
++  });
++
++  if (meta.childNodes.length) card.appendChild(meta);
++
++  if (data.sources && data.sources.length) {
++    const details = document.createElement("details");
++    details.className = "sources";
++    const summary = document.createElement("summary");
++    summary.textContent = `${data.sources.length} source${data.sources.length > 1 ? "s" : ""}`;
++    details.appendChild(summary);
++    data.sources.forEach((src) => {
++      const p = document.createElement("p");
++      p.className = "source-item";
++      p.innerHTML = `<span class="source-code">${src.course_code}</span> ${src.snippet}`;
++      details.appendChild(p);
++    });
++    card.appendChild(details);
++  }
++
++  thread.appendChild(card);
++  thread.scrollTop = thread.scrollHeight;
++  return card;
++}
++
+ function renderChip(course, isAll) {
+-  const chip = document.createElement("button");
+-  chip.type = "button";
++  const chip = document.createElement("div");
+   chip.className = "course-chip" + (isAll ? " active" : "");
+-  chip.innerHTML = `<span class="code">${course.course_code}</span><span class="name">${course.course_name}</span>`;
+-  chip.addEventListener("click", () => {
++
++  const main = document.createElement("button");
++  main.type = "button";
++  main.className = "course-chip-main";
++  main.innerHTML = `<span class="code">${course.course_code}</span><span class="name">${course.course_name}</span>`;
++  main.addEventListener("click", () => {
+     document.querySelectorAll(".course-chip").forEach((c) => c.classList.remove("active"));
+     chip.classList.add("active");
+     activeCourse = isAll ? null : course.course_code;
+@@ -43,6 +122,34 @@ function renderChip(course, isAll) {
+       ? "All courses"
+       : `${course.course_code} — ${course.course_name}`;
+   });
++  chip.appendChild(main);
++
++  if (course.custom) {
++    const del = document.createElement("button");
++    del.type = "button";
++    del.className = "course-chip-delete";
++    del.title = `Remove ${course.course_code}`;
++    del.textContent = "×";
++    del.addEventListener("click", async (e) => {
++      e.stopPropagation();
++      if (!confirm(`Remove ${course.course_code} from your syllabi?`)) return;
++      try {
++        const res = await fetch(`${API_BASE}/courses/${encodeURIComponent(course.course_code)}`, {
++          method: "DELETE",
++        });
++        if (!res.ok) throw new Error(`status ${res.status}`);
++        if (activeCourse === course.course_code) {
++          activeCourse = null;
++          activeCourseTab.textContent = "All courses";
++        }
++        loadCourses();
++      } catch (err) {
++        alert("Couldn't remove that course — is the backend running?");
++      }
++    });
++    chip.appendChild(del);
++  }
++
+   return chip;
+ }
+ 
+@@ -68,7 +175,7 @@ async function sendMessage(message) {
+   messageInput.disabled = true;
+   composer.querySelector("button").disabled = true;
+ 
+-  const pending = addCard("assistant", "Thinking…");
++  const pending = addThinkingCard();
+ 
+   try {
+     const res = await fetch(`${API_BASE}/chat`, {
+@@ -87,7 +194,8 @@ async function sendMessage(message) {
+     }
+ 
+     const data = await res.json();
+-    pending.innerHTML = renderMarkdown(data.response);
++    pending.remove();
++    addAssistantCard(data);
+   } catch (err) {
+     pending.className = "card error";
+     pending.textContent = `Request failed: ${err.message}`;
+@@ -106,13 +214,71 @@ composer.addEventListener("submit", (e) => {
+ });
+ 
+ resetBtn.addEventListener("click", async () => {
++  let summary = null;
+   try {
+-    await fetch(`${API_BASE}/chat/${sessionId}`, { method: "DELETE" });
++    const res = await fetch(`${API_BASE}/chat/${sessionId}?summarize=true`, { method: "DELETE" });
++    if (res.ok) {
++      const data = await res.json();
++      summary = data.summary;
++    }
+   } catch (err) {
+     // best-effort -- worst case the backend keeps one orphaned session entry
+   }
++
+   thread.innerHTML = "";
++  if (summary) {
++    const card = document.createElement("div");
++    card.className = "card recap";
++    card.innerHTML = `<p class="recap-label">Before we reset — a quick recap:</p>${renderMarkdown(summary)}`;
++    thread.appendChild(card);
++  }
+   addCard("assistant", "Conversation reset. Ask me anything about your syllabi.");
+ });
+ 
++addCourseBtn.addEventListener("click", () => {
++  addCourseForm.classList.toggle("hidden");
++  addCourseStatus.textContent = "";
++});
++
++cancelAddCourse.addEventListener("click", () => {
++  addCourseForm.classList.add("hidden");
++  addCourseForm.reset();
++  addCourseStatus.textContent = "";
++});
++
++addCourseForm.addEventListener("submit", async (e) => {
++  e.preventDefault();
++  const course_code = newCourseCode.value.trim();
++  const course_name = newCourseName.value.trim();
++  const content = newCourseContent.value.trim();
++
++  if (!course_code || !course_name || !content) {
++    addCourseStatus.textContent = "Fill in all three fields.";
++    addCourseStatus.className = "add-course-status error";
++    return;
++  }
++
++  addCourseStatus.textContent = "Saving…";
++  addCourseStatus.className = "add-course-status";
++
++  try {
++    const res = await fetch(`${API_BASE}/courses`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ course_code, course_name, content }),
++    });
++    const data = await res.json().catch(() => ({}));
++    if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
++
++    addCourseStatus.textContent = `${data.course_code} saved.`;
++    addCourseStatus.className = "add-course-status success";
++    addCourseForm.reset();
++    setTimeout(() => addCourseForm.classList.add("hidden"), 900);
++    loadCourses();
++  } catch (err) {
++    addCourseStatus.textContent = err.message;
++    addCourseStatus.className = "add-course-status error";
++  }
++});
++
+ loadCourses();
+diff --git a/frontend/index.html b/frontend/index.html
+index 5ee008f..19647a1 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -21,6 +21,23 @@
+         <p class="loading">Loading courses&hellip;</p>
+       </div>
+ 
++      <button class="add-course-btn" id="addCourseBtn" type="button">+ Add a syllabus</button>
++
++      <form class="add-course-form hidden" id="addCourseForm">
++        <input id="newCourseCode" type="text" placeholder="Course code (e.g. HIST150)" autocomplete="off" />
++        <input id="newCourseName" type="text" placeholder="Course name" autocomplete="off" />
++        <textarea
++          id="newCourseContent"
++          rows="5"
++          placeholder="Paste the syllabus text&hellip; grading breakdown, exam dates, topics, etc."
++        ></textarea>
++        <div class="add-course-actions">
++          <button type="submit">Save syllabus</button>
++          <button type="button" id="cancelAddCourse">Cancel</button>
++        </div>
++        <p class="add-course-status" id="addCourseStatus"></p>
++      </form>
++
+       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
+     </aside>
+ 
+@@ -33,7 +50,8 @@
+         <div class="card assistant">
+           <p>
+             Hi — I'm grounded strictly in the syllabi on the left. Ask me about grading, exam
+-            dates, attendance, GPA projections, or ask me to build you a study plan.
++            dates, attendance, GPA projections, or ask me to build you a study plan. Don't see
++            your course? Add its syllabus in the sidebar and I'll pick it up right away.
+           </p>
+         </div>
+       </div>
+diff --git a/frontend/style.css b/frontend/style.css
+index ded33a2..9f87a67 100644
+--- a/frontend/style.css
++++ b/frontend/style.css
+@@ -67,14 +67,11 @@ body {
+ 
+ .course-chip {
+   display: flex;
+-  flex-direction: column;
+-  gap: 2px;
+-  padding: 10px 12px;
++  align-items: stretch;
+   border: 1px solid #355d70;
+   border-radius: var(--radius);
+   background: #183240;
+-  cursor: pointer;
+-  text-align: left;
++  overflow: hidden;
+ }
+ 
+ .course-chip:hover {
+@@ -86,7 +83,21 @@ body {
+   background: #2b4d5f;
+ }
+ 
+-.course-chip .code {
++.course-chip-main {
++  flex: 1;
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++  padding: 10px 12px;
++  border: none;
++  background: transparent;
++  cursor: pointer;
++  text-align: left;
++  font: inherit;
++  min-width: 0;
++}
++
++.course-chip-main .code {
+   display: block;
+   font-family: "IBM Plex Mono", monospace;
+   font-weight: 600;
+@@ -94,10 +105,108 @@ body {
+   font-size: 0.82rem;
+ }
+ 
+-.course-chip .name {
++.course-chip-main .name {
+   display: block;
+   font-size: 0.82rem;
+   color: var(--rail-text);
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
++.course-chip-delete {
++  flex: 0 0 auto;
++  border: none;
++  background: transparent;
++  color: #7fa1ad;
++  font-size: 1.05rem;
++  line-height: 1;
++  padding: 0 12px;
++  cursor: pointer;
++}
++
++.course-chip-delete:hover {
++  color: #f3f7f6;
++  background: #3a2226;
++}
++
++.add-course-btn {
++  background: transparent;
++  border: 1px dashed #355d70;
++  color: #b8c9cd;
++  padding: 9px 10px;
++  border-radius: var(--radius);
++  font-size: 0.8rem;
++  cursor: pointer;
++}
++.add-course-btn:hover {
++  color: var(--rail-text);
++  border-color: var(--mustard);
++}
++
++.add-course-form {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  padding: 12px;
++  border: 1px solid #355d70;
++  border-radius: var(--radius);
++  background: #10222c;
++}
++.add-course-form.hidden {
++  display: none;
++}
++
++.add-course-form input,
++.add-course-form textarea {
++  background: #0a1b25;
++  border: 1px solid #355d70;
++  color: var(--rail-text);
++  border-radius: var(--radius);
++  padding: 8px 10px;
++  font-family: inherit;
++  font-size: 0.82rem;
++  resize: vertical;
++}
++.add-course-form input:focus,
++.add-course-form textarea:focus {
++  outline: none;
++  border-color: var(--mustard);
++}
++
++.add-course-actions {
++  display: flex;
++  gap: 8px;
++}
++.add-course-actions button {
++  flex: 1;
++  padding: 7px 10px;
++  border-radius: var(--radius);
++  font-size: 0.8rem;
++  cursor: pointer;
++  border: 1px solid #355d70;
++}
++.add-course-actions button[type="submit"] {
++  background: var(--mustard);
++  border-color: var(--mustard);
++  color: #0a1b25;
++  font-weight: 600;
++}
++.add-course-actions button[type="button"] {
++  background: transparent;
++  color: #b8c9cd;
++}
++
++.add-course-status {
++  font-size: 0.76rem;
++  min-height: 1em;
++  margin: 0;
++}
++.add-course-status.success {
++  color: #9fd4b4;
++}
++.add-course-status.error {
++  color: #e8a2a2;
+ }
+ 
+ .reset-btn {
+@@ -154,12 +263,62 @@ body {
+   line-height: 1.5;
+   font-size: 0.95rem;
+   white-space: pre-wrap;
++  animation: card-in 0.18s ease-out;
++}
++
++@keyframes card-in {
++  from {
++    opacity: 0;
++    transform: translateY(4px);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0);
++  }
+ }
+ 
+ .card p {
+   margin: 0;
+ }
+ 
++.card.thinking {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  color: #6c8994;
++  font-style: italic;
++}
++
++.dots {
++  display: inline-flex;
++  gap: 3px;
++}
++.dots span {
++  width: 5px;
++  height: 5px;
++  border-radius: 50%;
++  background: #6c8994;
++  animation: dot-bounce 1s infinite ease-in-out;
++}
++.dots span:nth-child(2) {
++  animation-delay: 0.15s;
++}
++.dots span:nth-child(3) {
++  animation-delay: 0.3s;
++}
++@keyframes dot-bounce {
++  0%,
++  80%,
++  100% {
++    transform: scale(0.6);
++    opacity: 0.4;
++  }
++  40% {
++    transform: scale(1);
++    opacity: 1;
++  }
++}
++
+ .card.assistant {
+   background: #f8fbfa;
+   border: 1px solid #c4d1d3;
+@@ -181,6 +340,73 @@ body {
+   border-left: 3px solid #78a6b8;
+ }
+ 
++.card.recap {
++  background: #eaf1ee;
++  border: 1px dashed var(--forest);
++  align-self: center;
++  font-size: 0.86rem;
++  max-width: 46ch;
++}
++
++.recap-label {
++  margin: 0 0 4px;
++  font-weight: 600;
++  color: var(--forest);
++}
++
++.card-meta {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px;
++  margin-top: 10px;
++}
++
++.badge {
++  font-size: 0.72rem;
++  padding: 3px 9px;
++  border-radius: 999px;
++  font-family: "IBM Plex Mono", monospace;
++  white-space: nowrap;
++}
++
++.badge.grounded {
++  background: #e4f0e8;
++  color: #2d5265;
++  border: 1px solid var(--forest);
++}
++
++.badge.tool {
++  background: var(--paper);
++  color: #557887;
++  border: 1px solid #c4d1d3;
++}
++
++.sources {
++  margin-top: 8px;
++  font-size: 0.8rem;
++}
++
++.sources summary {
++  cursor: pointer;
++  color: var(--forest);
++  font-weight: 500;
++}
++
++.source-item {
++  margin: 6px 0 0;
++  padding: 6px 8px;
++  background: var(--paper-dim);
++  border-radius: var(--radius);
++  color: #43606c;
++}
++
++.source-code {
++  font-family: "IBM Plex Mono", monospace;
++  font-weight: 600;
++  color: var(--forest);
++  margin-right: 6px;
++}
++
+ .composer {
+   display: flex;
+   gap: 10px;
+@@ -227,6 +453,10 @@ body {
+   color: #557887;
+ }
+ 
++.hidden {
++  display: none !important;
++}
++
+ @media (max-width: 720px) {
+   .app {
+     grid-template-columns: 1fr;

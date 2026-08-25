@@ -21,6 +21,23 @@
         <p class="loading">Loading courses&hellip;</p>
       </div>
 
+      <button class="add-course-btn" id="addCourseBtn" type="button">+ Add a syllabus</button>
+
+      <form class="add-course-form hidden" id="addCourseForm">
+        <input id="newCourseCode" type="text" placeholder="Course code (e.g. HIST150)" autocomplete="off" />
+        <input id="newCourseName" type="text" placeholder="Course name" autocomplete="off" />
+        <textarea
+          id="newCourseContent"
+          rows="5"
+          placeholder="Paste the syllabus text&hellip; grading breakdown, exam dates, topics, etc."
+        ></textarea>
+        <div class="add-course-actions">
+          <button type="submit">Save syllabus</button>
+          <button type="button" id="cancelAddCourse">Cancel</button>
+        </div>
+        <p class="add-course-status" id="addCourseStatus"></p>
+      </form>
+
       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
     </aside>
 
@@ -33,7 +50,8 @@
         <div class="card assistant">
           <p>
             Hi — I'm grounded strictly in the syllabi on the left. Ask me about grading, exam
-            dates, attendance, GPA projections, or ask me to build you a study plan.
+            dates, attendance, GPA projections, or ask me to build you a study plan. Don't see
+            your course? Add its syllabus in the sidebar and I'll pick it up right away.
           </p>
         </div>
       </div>

@@ -13,3 +13,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Locally-added syllabi (per-student, not part of the shared demo data)
+backend/custom_syllabi.json
+
+# Locally added syllabi (per-student, not part of the demo dataset)
+backend/custom_syllabi.json
