@@ -457,6 +457,154 @@ body {
   display: none !important;
 }
 
+/* ---------- v1.1: mode toggle bar ---------- */
+.mode-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 28px;
+  border-bottom: 1px solid #c4d1d3;
+  background: var(--paper);
+}
+
+.mode-btn {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid #c4d1d3;
+  background: #ffffff;
+  color: #557887;
+  cursor: pointer;
+}
+
+.mode-btn:hover {
+  border-color: var(--forest);
+}
+
+.mode-btn.active {
+  background: var(--forest);
+  border-color: var(--forest);
+  color: #f3f7f6;
+}
+
+.badge.mode {
+  background: #eaf1ee;
+  color: var(--forest);
+  border: 1px solid var(--forest);
+}
+
+/* ---------- v1.1: add-a-syllabus tabs (paste text / upload PDF) ---------- */
+.add-course-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.tab-btn {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #355d70;
+  color: #b8c9cd;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.tab-btn.active {
+  background: var(--mustard);
+  border-color: var(--mustard);
+  color: #0a1b25;
+  font-weight: 600;
+}
+
+.add-course-subform {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.append-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: #b8c9cd;
+}
+
+.pdf-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  color: #0a1b25;
+  background: var(--mustard);
+  padding: 1px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+/* ---------- v1.1: streaming assistant card ---------- */
+.card.streaming {
+  position: relative;
+}
+
+.stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  background: var(--forest);
+  vertical-align: text-bottom;
+  animation: cursor-blink 0.9s steps(1) infinite;
+}
+
+@keyframes cursor-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.card-meta.live {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.badge.tool.pending {
+  opacity: 0.65;
+  font-style: italic;
+}
+
+.stopped-note {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: #7fa1ad;
+}
+
+/* ---------- v1.1: stop button ---------- */
+#stopBtn {
+  padding: 0 20px;
+  background: #78353a;
+  color: #f3f7f6;
+  border: none;
+  border-radius: var(--radius);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+#stopBtn:hover {
+  background: #8f4247;
+}
+
 @media (max-width: 720px) {
   .app {
     grid-template-columns: 1fr;

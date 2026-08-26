@@ -15,7 +15,7 @@
   <div class="app">
     <aside class="rail">
       <h1 class="wordmark">Syllabus<br />&amp; Exam<br />Assistant</h1>
-      <p class="rail-caption">ConnectX Final Project &middot; Grounded RAG + Tools</p>
+      <p class="rail-caption">ConnectX Final Project &middot; Grounded RAG + Tools &middot; v1.1</p>
 
       <div class="course-list" id="courseList">
         <p class="loading">Loading courses&hellip;</p>
@@ -23,20 +23,42 @@
 
       <button class="add-course-btn" id="addCourseBtn" type="button">+ Add a syllabus</button>
 
-      <form class="add-course-form hidden" id="addCourseForm">
-        <input id="newCourseCode" type="text" placeholder="Course code (e.g. HIST150)" autocomplete="off" />
-        <input id="newCourseName" type="text" placeholder="Course name" autocomplete="off" />
-        <textarea
-          id="newCourseContent"
-          rows="5"
-          placeholder="Paste the syllabus text&hellip; grading breakdown, exam dates, topics, etc."
-        ></textarea>
-        <div class="add-course-actions">
-          <button type="submit">Save syllabus</button>
-          <button type="button" id="cancelAddCourse">Cancel</button>
+      <div class="add-course-form hidden" id="addCourseForm">
+        <div class="add-course-tabs">
+          <button type="button" class="tab-btn active" id="tabTextBtn">Paste text</button>
+          <button type="button" class="tab-btn" id="tabPdfBtn">Upload PDF</button>
         </div>
+
+        <form class="add-course-subform" id="addCourseTextForm">
+          <input id="newCourseCode" type="text" placeholder="Course code (e.g. HIST150)" autocomplete="off" />
+          <input id="newCourseName" type="text" placeholder="Course name" autocomplete="off" />
+          <textarea
+            id="newCourseContent"
+            rows="5"
+            placeholder="Paste the syllabus text&hellip; grading breakdown, exam dates, topics, etc."
+          ></textarea>
+          <div class="add-course-actions">
+            <button type="submit">Save syllabus</button>
+            <button type="button" id="cancelAddCourse">Cancel</button>
+          </div>
+        </form>
+
+        <form class="add-course-subform hidden" id="addCoursePdfForm">
+          <input id="pdfCourseCode" type="text" placeholder="Course code (e.g. HIST150)" autocomplete="off" />
+          <input id="pdfCourseName" type="text" placeholder="Course name" autocomplete="off" />
+          <input id="pdfFile" type="file" accept="application/pdf,.pdf" />
+          <label class="append-check">
+            <input type="checkbox" id="pdfAppend" />
+            Add to existing course with this code (instead of replacing it)
+          </label>
+          <div class="add-course-actions">
+            <button type="submit">Upload PDF</button>
+            <button type="button" id="cancelAddCoursePdf">Cancel</button>
+          </div>
+        </form>
+
         <p class="add-course-status" id="addCourseStatus"></p>
-      </form>
+      </div>
 
       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
     </aside>
@@ -46,12 +68,20 @@
         <span class="tab" id="activeCourseTab">All courses</span>
       </header>
 
+      <div class="mode-bar" id="modeBar">
+        <button type="button" class="mode-btn active" data-mode="">Normal</button>
+        <button type="button" class="mode-btn" data-mode="eli5">Explain Like I'm 5</button>
+        <button type="button" class="mode-btn" data-mode="exam">Exam Mode</button>
+        <button type="button" class="mode-btn" data-mode="teach">Teach Me This Chapter</button>
+      </div>
+
       <div class="thread" id="thread">
         <div class="card assistant">
           <p>
             Hi — I'm grounded strictly in the syllabi on the left. Ask me about grading, exam
             dates, attendance, GPA projections, or ask me to build you a study plan. Don't see
-            your course? Add its syllabus in the sidebar and I'll pick it up right away.
+            your course? Add its syllabus in the sidebar — paste the text or upload a PDF — and
+            I'll pick it up right away.
           </p>
         </div>
       </div>
@@ -63,7 +93,8 @@
           placeholder="Ask about a policy, your GPA, or a study plan…"
           autocomplete="off"
         />
-        <button type="submit">Send</button>
+        <button type="submit" id="sendBtn">Send</button>
+        <button type="button" id="stopBtn" class="hidden">Stop</button>
       </form>
     </main>
   </div>

@@ -16,6 +16,21 @@ On top of the base loop, this version:
     whether an answer was grounded and show its sources;
   - exposes summarize() so a session can get a short recap right before
     it's reset instead of just vanishing.
+
+v1.1 additions:
+  - explicit interaction modes (ELI5 / Exam / Teach Me This Chapter),
+    injected as an ephemeral system message for the current turn only --
+    never persisted into session history, so the mode applies exactly to
+    the request that asked for it and nothing "sticks" silently. Grounding
+    rules 1-4 in GUARDRAIL_SYSTEM_PROMPT are unaffected by any mode.
+  - chat_stream(): a generator twin of chat() for the streaming endpoint.
+    Tool-call resolution works exactly like chat() (same turn-by-turn
+    .invoke()-equivalent loop); the one part that streams token-by-token
+    is the model's final, tool-free answer, since that's the only part a
+    student is actually waiting to read live. See the inline note in
+    chat_stream for how it tells a "this turn is calling a tool" stream
+    apart from a "this turn is the real answer" stream before deciding
+    whether to forward tokens.
 """
 import re
 
@@ -33,12 +48,14 @@ Rules you must always follow:
    exactly with: "I don't see that in the syllabus -- please check with your Teaching Assistant." Do not
    guess or fall back on outside knowledge.
 3. When a student asks about their GPA or how a grade would affect it, call the gpa_impact_simulator tool
-   directly -- don't call search_syllabus first unless they're also asking about a specific course policy.
-   Never do GPA arithmetic yourself.
-4. When a student asks for a study plan or revision schedule: first call search_syllabus to find the
-   relevant lecture topics AND the grading breakdown if you don't already have them, then call
-   generate_study_schedule with those topics -- and whenever the grading breakdown gives you percentages
-   for the relevant exam/topics, pass them as topic_weights so heavier-weighted material gets more days.
+   directly. When a student states a *target* GPA and asks what grades they'd need, call
+   gpa_target_planner instead. Don't call search_syllabus first unless they're also asking about a
+   specific course policy. Never do GPA arithmetic yourself.
+4. When a student asks for a study plan or revision schedule and gives you a course code, call
+   build_ai_study_plan first -- it pulls the topics (and, given an exam date, the day count) straight
+   from the syllabus automatically. Only fall back to search_syllabus + generate_study_schedule if
+   build_ai_study_plan reports it couldn't find a structured topic list, or the student gives you an
+   explicit topic list of their own instead of a course code.
 5. Messages may start with a bracketed hint like "[Likely tool: ...]" -- treat it as a suggestion from
    the interface, not a hard rule. Use your own judgment about which tool actually fits the question.
 6. Keep answers concise.
@@ -47,7 +64,33 @@ Rules you must always follow:
 SUMMARY_SYSTEM_PROMPT = """Summarize the conversation below in exactly 3 short lines, each starting with
 a dash. Focus on what the student asked and what was found or calculated. No preamble, no closing remarks."""
 
+MODE_PROMPTS: dict[str, str] = {
+    "eli5": """Explain Like I'm Stupid mode is ON for this turn only.
+Rewrite your answer for someone with zero background: short sentences, everyday words, one idea
+per sentence, and a concrete analogy if it helps. Do not skip steps or assume prior knowledge.
+This changes HOW you explain, not WHAT you're allowed to say -- rules 1-4 above (grounding, tool
+use) still apply exactly as written; never invent facts just to keep the explanation simple.""",
+
+    "exam": """Exam Mode is ON for this turn. The student is actively revising, not casually
+chatting. Lean toward exam-relevant framing: which topics are most heavily weighted, what's likely
+to be tested, and concrete revision/practice actions. If it fits the question, offer to quiz them
+with a practice question, or ask one yourself before giving the full answer. Stay grounded in the
+syllabus per the rules above -- if asked for a practice question, base it on real topics/policies
+you retrieved, not a fabricated specific like a made-up question number or past-paper detail.""",
+
+    "teach": """Teach Me This Chapter mode is ON. Structure your entire response as a short
+tutoring sequence, in this exact order, with clear labels:
+1. Explanation -- the core idea in plain terms, grounded in the retrieved syllabus content.
+2. Example -- one concrete, worked example illustrating it.
+3. Understanding check -- one short question testing whether the idea landed (don't answer it
+   yourself; wait for the student's reply next turn).
+4. Practice -- one practice prompt or problem the student can try on their own.
+Call search_syllabus first if you haven't already retrieved content for this topic -- teaching from
+memory instead of the actual syllabus defeats the point of this mode.""",
+}
+
 _GPA_KEYWORDS = ("gpa", "grade point", "cumulative average", "what would my grade", "my grade be")
+_GPA_TARGET_KEYWORDS = ("what gpa do i need", "reach a", "target gpa", "goal gpa", "hit a gpa")
 _SCHEDULE_KEYWORDS = (
     "study plan", "study schedule", "revision plan", "revise for",
     "how should i study", "days until", "prepare for", "cram",
@@ -60,18 +103,20 @@ def _intent_hint(user_input: str) -> str | None:
     obvious matches, letting the model decide freely.
     """
     text = user_input.lower()
+    if any(k in text for k in _GPA_TARGET_KEYWORDS):
+        return "gpa_target_planner (this reads like a target-GPA planning question)"
     if any(k in text for k in _GPA_KEYWORDS):
         return "gpa_impact_simulator (this reads like a GPA question, not a syllabus lookup)"
     if any(k in text for k in _SCHEDULE_KEYWORDS):
-        return "generate_study_schedule (this reads like a study-planning question)"
+        return "build_ai_study_plan (this reads like a study-planning question)"
     return None
 
 
 def _parse_sources(observation: str) -> list[dict]:
-    """Pulls {course_code, snippet} pairs back out of format_docs()'s
-    "[CODE] content" blocks so the API layer can report exactly what
-    grounded an answer, without search_syllabus needing to know about
-    HTTP responses at all.
+    """Pulls {course_code, snippet, page?} entries back out of
+    format_docs()'s "[CODE] content" / "[CODE|p.N] content" blocks so the
+    API layer can report exactly what grounded an answer, without
+    search_syllabus needing to know about HTTP responses at all.
     """
     if observation.startswith("NOT_FOUND") or observation.startswith("Syllabus search error"):
         return []
@@ -82,11 +127,26 @@ def _parse_sources(observation: str) -> list[dict]:
         match = re.match(r"^\[([^\]]+)\]\s*(.*)$", block, re.DOTALL)
         if not match:
             continue
-        code, snippet = match.group(1).strip(), match.group(2).strip()
+        tag, snippet = match.group(1).strip(), match.group(2).strip()
+        if "|p." in tag:
+            code, page_str = tag.split("|p.", 1)
+            page = int(page_str) if page_str.isdigit() else None
+        else:
+            code, page = tag, None
         if len(snippet) > 220:
             snippet = snippet[:220].rsplit(" ", 1)[0] + "\u2026"
-        sources.append({"course_code": code, "snippet": snippet})
+        entry: dict = {"course_code": code.strip(), "snippet": snippet}
+        if page is not None:
+            entry["page"] = page
+        sources.append(entry)
     return sources
+
+
+def _dedupe_sources(sources: list[dict]) -> list[dict]:
+    seen = {}
+    for s in sources:
+        seen[(s["course_code"], s.get("page"), s["snippet"])] = s
+    return list(seen.values())
 
 
 class SyllabusAssistantAgent:
@@ -104,6 +164,19 @@ class SyllabusAssistantAgent:
         if session_id not in self._sessions:
             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
         return self._sessions[session_id]
+
+    @staticmethod
+    def _with_mode(history: list, mode_prompt: str | None) -> list:
+        """Builds the message list actually sent to the LLM for one call:
+        the persisted history, plus an ephemeral mode instruction (if any)
+        injected right after the base system prompt. The mode instruction
+        is never appended to `history` itself, so it applies only to the
+        request that asked for it -- the next turn starts back in normal
+        mode unless the caller asks for a mode again.
+        """
+        if not mode_prompt:
+            return history
+        return [history[0], SystemMessage(content=mode_prompt)] + history[1:]
 
     def reset(self, session_id: str) -> None:
         """Clears a session's memory; the next turn starts a fresh SystemMessage."""
@@ -136,12 +209,13 @@ class SyllabusAssistantAgent:
         except Exception:
             return None
 
-    def chat(self, session_id: str, user_input: str) -> dict:
+    def chat(self, session_id: str, user_input: str, mode: str | None = None) -> dict:
         """Runs one turn of the ReAct loop.
 
-        Returns {"content": str, "sources": list[dict], "tools_used": list[str]}
-        instead of a bare string so the API layer can surface grounding
-        info and which tools actually fired for this turn.
+        Returns {"content": str, "sources": list[dict], "tools_used": list[str],
+        "mode": str | None} instead of a bare string so the API layer can
+        surface grounding info, which tools actually fired, and which mode
+        (if any) applied to this turn.
         """
         history = self._history(session_id)
 
@@ -149,23 +223,33 @@ class SyllabusAssistantAgent:
         tagged_input = f"[Likely tool: {hint}] {user_input}" if hint else user_input
         history.append(HumanMessage(content=tagged_input))
 
+        mode_key = (mode or "").strip().lower()
+        mode_prompt = MODE_PROMPTS.get(mode_key)
+
         tools_used: list[str] = []
         sources: list[dict] = []
 
         for _ in range(self.max_turns):
+            call_messages = self._with_mode(history, mode_prompt)
             try:
-                ai_msg: AIMessage = self.llm_with_tools.invoke(history)
+                ai_msg: AIMessage = self.llm_with_tools.invoke(call_messages)
             except Exception as e:
                 return {
                     "content": f"Sorry, I hit an error talking to the model: {e}",
                     "sources": [],
                     "tools_used": [],
+                    "mode": mode_key or None,
                 }
 
             history.append(ai_msg)
 
             if not getattr(ai_msg, "tool_calls", None):
-                return {"content": ai_msg.content, "sources": _dedupe_sources(sources), "tools_used": tools_used}
+                return {
+                    "content": ai_msg.content,
+                    "sources": _dedupe_sources(sources),
+                    "tools_used": tools_used,
+                    "mode": mode_key or None,
+                }
 
             for tool_call in ai_msg.tool_calls:
                 name = tool_call["name"]
@@ -183,11 +267,100 @@ class SyllabusAssistantAgent:
             "content": "I'm having trouble finishing that request -- could you rephrase or ask one thing at a time?",
             "sources": _dedupe_sources(sources),
             "tools_used": tools_used,
+            "mode": mode_key or None,
         }
 
+    def chat_stream(self, session_id: str, user_input: str, mode: str | None = None):
+        """Generator twin of chat(): yields small event dicts as the turn
+        progresses instead of returning one final dict, so the API layer can
+        forward them to the client live over SSE.
 
-def _dedupe_sources(sources: list[dict]) -> list[dict]:
-    seen = {}
-    for s in sources:
-        seen[(s["course_code"], s["snippet"])] = s
-    return list(seen.values())
+        Event shapes:
+          {"type": "tool", "name": ...}                                  -- a tool started running
+          {"type": "token", "text": ...}                                 -- a piece of the final answer
+          {"type": "done", "content", "sources", "tools_used", "mode"}   -- turn finished normally
+          {"type": "error", "error": ...}                                -- turn failed; stream ends
+
+        Tool-call turns and the final tool-free answer turn are both run via
+        .stream() so a network/API error surfaces mid-turn instead of only
+        after a full non-streaming call would have completed -- but tokens
+        are only forwarded to the caller once we're confident this turn is
+        the real answer and not a tool call: the very first chunk of a turn
+        tells us which, since providers emit tool_call_chunks (not prose)
+        from the first chunk of a turn that's invoking a tool. That's a
+        pragmatic heuristic, not a guarantee for every possible provider
+        behavior -- a model that emitted a little preamble text before
+        deciding to call a tool could leak that fragment -- but it matches
+        how this project's guardrail prompt already tells the model to
+        behave (call the tool, don't narrate first), and it avoids the far
+        more fragile alternative of trying to detect and retroactively
+        "unsend" already-streamed tokens.
+        """
+        history = self._history(session_id)
+
+        hint = _intent_hint(user_input)
+        tagged_input = f"[Likely tool: {hint}] {user_input}" if hint else user_input
+        history.append(HumanMessage(content=tagged_input))
+
+        mode_key = (mode or "").strip().lower()
+        mode_prompt = MODE_PROMPTS.get(mode_key)
+
+        tools_used: list[str] = []
+        sources: list[dict] = []
+
+        for turn in range(self.max_turns):
+            call_messages = self._with_mode(history, mode_prompt)
+            is_tool_turn: bool | None = None
+            chunks = []
+
+            try:
+                for chunk in self.llm_with_tools.stream(call_messages):
+                    chunks.append(chunk)
+                    if is_tool_turn is None:
+                        is_tool_turn = bool(getattr(chunk, "tool_call_chunks", None))
+                    if not is_tool_turn and chunk.content:
+                        yield {"type": "token", "text": chunk.content}
+            except Exception as e:
+                yield {"type": "error", "error": f"Sorry, I hit an error talking to the model: {e}"}
+                return
+
+            if not chunks:
+                yield {"type": "error", "error": "No response was generated."}
+                return
+
+            ai_msg = chunks[0]
+            for c in chunks[1:]:
+                ai_msg = ai_msg + c
+
+            history.append(ai_msg)
+
+            if not getattr(ai_msg, "tool_calls", None):
+                yield {
+                    "type": "done",
+                    "content": ai_msg.content,
+                    "sources": _dedupe_sources(sources),
+                    "tools_used": tools_used,
+                    "mode": mode_key or None,
+                }
+                return
+
+            for tool_call in ai_msg.tool_calls:
+                name = tool_call["name"]
+                yield {"type": "tool", "name": name}
+                tool_obj = self.tools_map.get(name)
+                if tool_obj is None:
+                    observation = f"Error: tool '{name}' is not registered."
+                else:
+                    observation = tool_obj.invoke(tool_call["args"])
+                    tools_used.append(name)
+                    if name == "search_syllabus":
+                        sources.extend(_parse_sources(str(observation)))
+                history.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
+
+        yield {
+            "type": "done",
+            "content": "I'm having trouble finishing that request -- could you rephrase or ask one thing at a time?",
+            "sources": _dedupe_sources(sources),
+            "tools_used": tools_used,
+            "mode": mode_key or None,
+        }
