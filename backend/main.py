@@ -9,11 +9,16 @@ plain FastAPI() app instance. Run from the project root with:
 
 v1.1 additions: POST /courses/upload (PDF ingestion) and POST /chat/stream
 (SSE streaming chat) -- see their docstrings below for details.
+
+Rate-limiting addition: both /chat and /chat/stream are throttled per
+visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
+IP) before the agent is ever called, and every Groq call inside the
+agent retries with backoff on a 429 -- see backend/agent.py.
 """
 import json
 import os
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware  # connects the front and back ends in browser
 from fastapi.responses import StreamingResponse
 from langchain_groq import ChatGroq
@@ -36,6 +41,7 @@ from .rag import (
     build_syllabus_vectorstore,
     remove_course_from_vectorstore,
 )
+from .rate_limit import check_and_increment
 from .tools import make_tools  # imports function that creates the tools used
 
 # ---------------------------------------------------------------------------
@@ -94,6 +100,15 @@ def _course_registry() -> dict[str, dict]:
             "page_count": len(pages) if pages else None,
         }
     return registry
+
+
+def _client_key(request: Request) -> str:
+    """Best-effort visitor identifier for the rate limiter -- the client IP
+    as FastAPI/Starlette sees it. Falls back to a constant if it's ever
+    missing (e.g. certain test clients) so throttling degrades to "shared
+    across all such requests" instead of crashing.
+    """
+    return request.client.host if request.client else "unknown"
 
 
 # Backend security check
@@ -222,9 +237,16 @@ def _prefixed_input(req: ChatRequest) -> str:
 
 # This is where the frontend sends the users messages
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, request: Request):
     if not req.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
+
+    allowed, retry_after = check_and_increment(_client_key(request))
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
+        )
 
     result = agent.chat(session_id=req.session_id, user_input=_prefixed_input(req), mode=req.mode)
     return ChatResponse(
@@ -238,7 +260,7 @@ def chat(req: ChatRequest):
 
 
 @app.post("/chat/stream")
-def chat_stream(req: ChatRequest):
+def chat_stream(req: ChatRequest, request: Request):
     """Streaming twin of POST /chat, as Server-Sent Events. Each event is a
     line `data: <json>\\n\\n` with one of these shapes:
 
@@ -253,9 +275,21 @@ def chat_stream(req: ChatRequest):
     the generator raises GeneratorExit on its next yield and this function
     lets that propagate to stop cleanly rather than trying to keep writing
     to a closed connection.
+
+    The rate-limit check happens here, before the StreamingResponse is
+    even constructed, so a throttled request comes back as a normal JSON
+    429 the frontend already knows how to parse -- not a malformed or
+    empty SSE stream.
     """
     if not req.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
+
+    allowed, retry_after = check_and_increment(_client_key(request))
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
+        )
 
     user_input = _prefixed_input(req)
 

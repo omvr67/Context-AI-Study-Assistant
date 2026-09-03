@@ -353,7 +353,7 @@ async function sendMessage(message) {
         streamCard.querySelector(".stream-cursor")?.remove();
         streamCard.classList.add("error");
       } else {
-        addCard("error", `Request failed: ${err.message}`);
+        addCard("error", err.message);
       }
     }
   } finally {

@@ -623,3 +623,151 @@ body {
     margin-top: 0;
   }
 }
+
+/* ---------- Feature tip index card ----------
+   Extends the rail's own "card index" language (see .course-chip above)
+   instead of reading like a generic bolted-on toast: a small tab pulls
+   up into a single index card that cycles through short feature notes.
+   Motion is limited to one load-in, a crossfade per tip change, and a
+   progress rule that mirrors real timing -- nothing decorative loops. */
+.tip-index {
+  position: fixed;
+  right: 20px;
+  bottom: 96px;
+  z-index: 40;
+}
+
+.tip-index-tab {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--forest);
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 2px 8px rgba(10, 27, 37, 0.14);
+  cursor: pointer;
+}
+.tip-index-tab.visible {
+  display: flex;
+}
+.tip-index-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mustard);
+}
+
+.tip-index-card {
+  position: relative;
+  width: 272px;
+  max-width: calc(100vw - 40px);
+  padding: 12px 30px 10px 14px;
+  background: var(--paper);
+  border: 1px solid #c4d1d3;
+  border-left: 3px solid var(--mustard);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 14px rgba(10, 27, 37, 0.14);
+  animation: tip-card-in 0.35s ease-out;
+}
+.tip-index-card.hidden {
+  display: none;
+}
+
+@keyframes tip-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tip-index-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: #7fa1ad;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.tip-index-close:hover {
+  color: var(--ink);
+}
+
+.tip-index-text {
+  margin: 0;
+  min-height: 2.6em;
+  font-size: 0.83rem;
+  line-height: 1.45;
+  color: var(--ink);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.tip-index-text.swap {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.tip-index-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tip-index-count {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  color: #7c97a1;
+  white-space: nowrap;
+}
+
+.tip-index-progress {
+  flex: 1;
+  height: 2px;
+  overflow: hidden;
+  background: var(--paper-dim);
+  border-radius: 2px;
+}
+.tip-index-progress span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--mustard);
+}
+
+@keyframes tip-progress-fill {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tip-index-card,
+  .tip-index-text,
+  .tip-index-progress span {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .tip-index {
+    right: 12px;
+    bottom: 84px;
+  }
+  .tip-index-card {
+    width: 240px;
+  }
+}

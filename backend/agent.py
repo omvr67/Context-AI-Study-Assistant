@@ -31,8 +31,16 @@ v1.1 additions:
     chat_stream for how it tells a "this turn is calling a tool" stream
     apart from a "this turn is the real answer" stream before deciding
     whether to forward tokens.
+
+Rate-limiting addition:
+  - every Groq call (chat()'s invoke, chat_stream()'s stream, and
+    summarize()'s invoke) goes through _invoke_with_backoff /
+    _stream_with_backoff, which retries with exponential backoff on a
+    429 and otherwise fails immediately. See backend/rate_limit.py for
+    the separate per-visitor request throttle enforced in main.py.
 """
 import re
+import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -95,6 +103,74 @@ _SCHEDULE_KEYWORDS = (
     "study plan", "study schedule", "revision plan", "revise for",
     "how should i study", "days until", "prepare for", "cram",
 )
+
+# Retry/backoff for Groq calls -- see _invoke_with_backoff and
+# _stream_with_backoff. Not about cost (Groq's free tier is free); it's
+# so a busy demo session doesn't turn into a hard failure the moment
+# Groq's per-minute cap is briefly hit.
+_MAX_RETRIES = 3
+_BASE_DELAY_SECONDS = 1.0
+
+FRIENDLY_QUOTA_MESSAGE = (
+    "We've hit the shared AI quota for a moment -- please wait a few seconds and try again."
+)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detects a 429 from Groq without depending on the exact exception
+    class the client library raises (groq's SDK, langchain's wrapper, or
+    a raw httpx error can all surface this differently depending on
+    version). Checking status_code plus a couple of string/name
+    fallbacks catches all of them without an extra dependency.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    if status == 429:
+        return True
+    name = type(exc).__name__.lower()
+    return "ratelimit" in name or "429" in str(exc)
+
+
+def _invoke_with_backoff(invoke_fn, messages, max_retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY_SECONDS):
+    """Calls invoke_fn(messages) with exponential backoff, but only for
+    429s -- anything else (bad request, auth failure, etc.) fails
+    immediately since retrying those just burns time for no benefit.
+    Backoff schedule: base_delay, base_delay*2, base_delay*4, ...
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return invoke_fn(messages)
+        except Exception as e:
+            last_exc = e
+            if not _is_rate_limit_error(e) or attempt == max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+    raise last_exc  # pragma: no cover -- loop above always returns or raises
+
+
+def _stream_with_backoff(stream_fn, messages, max_retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY_SECONDS):
+    """Retries the underlying .stream() call with backoff, but only while
+    no chunks have been yielded yet for the current attempt -- once even
+    one token has reached the caller, retrying would mean re-sending
+    duplicate output, so any error after that point is left to propagate
+    instead of silently duplicating partial output.
+    """
+    attempt = 0
+    while True:
+        got_any = False
+        try:
+            for chunk in stream_fn(messages):
+                got_any = True
+                yield chunk
+            return
+        except Exception as e:
+            if got_any or not _is_rate_limit_error(e) or attempt == max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+            attempt += 1
 
 
 def _intent_hint(user_input: str) -> str | None:
@@ -201,7 +277,7 @@ class SyllabusAssistantAgent:
 
         transcript = "\n".join(transcript_lines)[-4000:]  # keep the summarizer prompt small
         try:
-            summary_msg = self.llm.invoke([
+            summary_msg = _invoke_with_backoff(self.llm.invoke, [
                 SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
                 HumanMessage(content=transcript),
             ])
@@ -232,10 +308,11 @@ class SyllabusAssistantAgent:
         for _ in range(self.max_turns):
             call_messages = self._with_mode(history, mode_prompt)
             try:
-                ai_msg: AIMessage = self.llm_with_tools.invoke(call_messages)
+                ai_msg: AIMessage = _invoke_with_backoff(self.llm_with_tools.invoke, call_messages)
             except Exception as e:
+                content = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Sorry, I hit an error talking to the model: {e}"
                 return {
-                    "content": f"Sorry, I hit an error talking to the model: {e}",
+                    "content": content,
                     "sources": [],
                     "tools_used": [],
                     "mode": mode_key or None,
@@ -314,14 +391,15 @@ class SyllabusAssistantAgent:
             chunks = []
 
             try:
-                for chunk in self.llm_with_tools.stream(call_messages):
+                for chunk in _stream_with_backoff(self.llm_with_tools.stream, call_messages):
                     chunks.append(chunk)
                     if is_tool_turn is None:
                         is_tool_turn = bool(getattr(chunk, "tool_call_chunks", None))
                     if not is_tool_turn and chunk.content:
                         yield {"type": "token", "text": chunk.content}
             except Exception as e:
-                yield {"type": "error", "error": f"Sorry, I hit an error talking to the model: {e}"}
+                error_msg = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Sorry, I hit an error talking to the model: {e}"
+                yield {"type": "error", "error": error_msg}
                 return
 
             if not chunks:

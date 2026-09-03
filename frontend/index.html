@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Syllabus & Exam Assistant</title>
+  <title>Context AI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Roboto+Slab:wght@600;700&family=Inter:wght@400;500&display=swap"
@@ -14,9 +14,9 @@
 <body>
   <div class="app">
     <aside class="rail">
-      <h1 class="wordmark">Syllabus<br />&amp; Exam<br />Assistant</h1>
-      <p class="rail-caption">ConnectX Final Project &middot; Grounded RAG + Tools &middot; v1.1</p>
-
+      <h1 class="wordmark">Context AI   </h1>
+      <h1 class="wordmark">     </h1>
+      <p class="rail-caption">Your Syllabus & Exam Assistant &middot; Grounded RAG + Tools &middot; PDF uploads now added &middot; v1.1</p>
       <div class="course-list" id="courseList">
         <p class="loading">Loading courses&hellip;</p>
       </div>
@@ -99,6 +99,28 @@
     </main>
   </div>
 
+  <aside class="tip-index" id="tipIndex">
+    <button
+      class="tip-index-tab"
+      id="tipIndexTab"
+      type="button"
+      aria-expanded="true"
+      aria-controls="tipIndexCard"
+      title="Feature tips"
+    >
+      <span class="tip-index-tab-dot"></span>
+    </button>
+    <div class="tip-index-card" id="tipIndexCard">
+      <button class="tip-index-close" id="tipIndexClose" type="button" aria-label="Hide tips">&times;</button>
+      <p class="tip-index-text" id="tipIndexText" aria-live="polite"></p>
+      <div class="tip-index-footer">
+        <span class="tip-index-count" id="tipIndexCount"></span>
+        <div class="tip-index-progress"><span id="tipIndexProgressFill"></span></div>
+      </div>
+    </div>
+  </aside>
+
   <script src="app.js"></script>
+  <script src="tips.js"></script>
 </body>
 </html>
