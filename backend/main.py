@@ -57,6 +57,7 @@ if not GROQ_API_KEY:
 llm = ChatGroq(  # creates the LM interface
     model="openai/gpt-oss-120b",
     temperature=0.0,
+    max_tokens=8192, #Increase the max tokens to 8192 for larger context
     api_key=GROQ_API_KEY)
 
 # vectorstore starts loaded with the 3 hardcoded syllabi *and* anything a
