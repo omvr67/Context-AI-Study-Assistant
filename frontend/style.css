@@ -1,14 +1,17 @@
 :root {
-  --ink: #152a36;
-  --paper: #eef3f2;
-  --paper-dim: #d8e1e2;
-  --rail: #0a1b25;
-  --rail-text: #edf4f3;
-  --forest: #2d5265;
-  --mustard: #5b8295;
-  --user-bubble: #152a36;
-  --user-text: #f3f7f6;
-  --radius: 3px;
+  --ink: #15130F;
+  --paper: #F7F4EC;
+  --paper-dim: #EAE4D3;
+  --rail: #15130F;
+  --rail-text: #F3EEE0;
+  --accent: #5B564A;
+  --accent-warm: #A68A5B;
+  --user-bubble: #15130F;
+  --user-text: #F7F4EC;
+  --border: #DDD5BE;
+  --text-muted: #6E6858;
+  --radius: 2px;
+  --rail-width: 260px;
 }
 
 * {
@@ -29,32 +32,126 @@ body {
 
 .app {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: var(--rail-width) 6px 1fr;
   height: 100vh;
+  transition: grid-template-columns 0.18s ease;
+}
+
+body.rail-collapsed .app {
+  grid-template-columns: 0px 0px 1fr;
+}
+
+body.rail-resizing .app {
+  transition: none;
 }
 
 /* ---------- Left rail: course tabs, styled like a card index ---------- */
 .rail {
+  position: relative;
   background: var(--rail);
   color: var(--rail-text);
   padding: 28px 22px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  overflow: hidden;
+  transition: opacity 0.15s ease;
+}
+
+body.rail-collapsed .rail {
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rail-collapse-btn {
+  position: absolute;
+  top: 26px;
+  right: 14px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--rail-text);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.rail-collapse-btn:hover {
+  border-color: var(--accent-warm);
+  color: var(--accent-warm);
+}
+
+/* Drag-to-resize track between the rail and the main deck */
+.rail-resize-handle {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+}
+.rail-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--border);
+}
+.rail-resize-handle:hover::after,
+body.rail-resizing .rail-resize-handle::after {
+  background: var(--accent-warm);
+}
+body.rail-collapsed .rail-resize-handle {
+  pointer-events: none;
+}
+
+/* Small tab that re-opens a collapsed rail */
+.rail-expand-tab {
+  display: none;
+  position: fixed;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+  background: var(--paper);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  z-index: 30;
+  box-shadow: 2px 0 8px rgba(21, 19, 15, 0.1);
+}
+body.rail-collapsed .rail-expand-tab {
+  display: flex;
+}
+.rail-expand-tab:hover {
+  color: var(--accent-warm);
+  border-color: var(--accent-warm);
 }
 
 .wordmark {
-  font-family: "Roboto Slab", serif;
-  font-size: 1.5rem;
+  font-family: "Newsreader", Georgia, serif;
+  font-style: italic;
+  font-weight: 600;
+  font-size: 1.6rem;
   line-height: 1.15;
   margin: 0;
-  color: #f3f7f6;
+  color: #F7F4EC;
 }
 
 .rail-caption {
   font-size: 0.78rem;
   letter-spacing: 0.02em;
-  color: #b8c9cd;
+  color: #A79A82;
   margin: -8px 0 4px;
 }
 
@@ -68,19 +165,19 @@ body {
 .course-chip {
   display: flex;
   align-items: stretch;
-  border: 1px solid #355d70;
+  border: 1px solid #302C22;
   border-radius: var(--radius);
-  background: #183240;
+  background: #1E1B14;
   overflow: hidden;
 }
 
 .course-chip:hover {
-  border-color: var(--mustard);
+  border-color: var(--accent-warm);
 }
 
 .course-chip.active {
-  border-color: var(--mustard);
-  background: #2b4d5f;
+  border-color: var(--accent-warm);
+  background: #2A2519;
 }
 
 .course-chip-main {
@@ -101,7 +198,7 @@ body {
   display: block;
   font-family: "IBM Plex Mono", monospace;
   font-weight: 600;
-  color: var(--mustard);
+  color: var(--accent-warm);
   font-size: 0.82rem;
 }
 
@@ -118,7 +215,7 @@ body {
   flex: 0 0 auto;
   border: none;
   background: transparent;
-  color: #7fa1ad;
+  color: #8C8170;
   font-size: 1.05rem;
   line-height: 1;
   padding: 0 12px;
@@ -126,14 +223,14 @@ body {
 }
 
 .course-chip-delete:hover {
-  color: #f3f7f6;
-  background: #3a2226;
+  color: #F7F4EC;
+  background: #33221C;
 }
 
 .add-course-btn {
   background: transparent;
-  border: 1px dashed #355d70;
-  color: #b8c9cd;
+  border: 1px dashed #302C22;
+  color: #A79A82;
   padding: 9px 10px;
   border-radius: var(--radius);
   font-size: 0.8rem;
@@ -141,7 +238,7 @@ body {
 }
 .add-course-btn:hover {
   color: var(--rail-text);
-  border-color: var(--mustard);
+  border-color: var(--accent-warm);
 }
 
 .add-course-form {
@@ -149,9 +246,9 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid #355d70;
+  border: 1px solid #302C22;
   border-radius: var(--radius);
-  background: #10222c;
+  background: #1A170F;
 }
 .add-course-form.hidden {
   display: none;
@@ -159,8 +256,8 @@ body {
 
 .add-course-form input,
 .add-course-form textarea {
-  background: #0a1b25;
-  border: 1px solid #355d70;
+  background: #15130F;
+  border: 1px solid #302C22;
   color: var(--rail-text);
   border-radius: var(--radius);
   padding: 8px 10px;
@@ -171,7 +268,7 @@ body {
 .add-course-form input:focus,
 .add-course-form textarea:focus {
   outline: none;
-  border-color: var(--mustard);
+  border-color: var(--accent-warm);
 }
 
 .add-course-actions {
@@ -184,17 +281,17 @@ body {
   border-radius: var(--radius);
   font-size: 0.8rem;
   cursor: pointer;
-  border: 1px solid #355d70;
+  border: 1px solid #302C22;
 }
 .add-course-actions button[type="submit"] {
-  background: var(--mustard);
-  border-color: var(--mustard);
-  color: #0a1b25;
+  background: var(--accent-warm);
+  border-color: var(--accent-warm);
+  color: #15130F;
   font-weight: 600;
 }
 .add-course-actions button[type="button"] {
   background: transparent;
-  color: #b8c9cd;
+  color: #A79A82;
 }
 
 .add-course-status {
@@ -203,17 +300,17 @@ body {
   margin: 0;
 }
 .add-course-status.success {
-  color: #9fd4b4;
+  color: #566B44;
 }
 .add-course-status.error {
-  color: #e8a2a2;
+  color: #8C4A3A;
 }
 
 .reset-btn {
   margin-top: auto;
   background: transparent;
-  border: 1px solid #355d70;
-  color: #b8c9cd;
+  border: 1px solid #302C22;
+  color: #A79A82;
   padding: 9px 10px;
   border-radius: var(--radius);
   font-size: 0.8rem;
@@ -233,7 +330,7 @@ body {
 
 .deck-header {
   padding: 18px 28px;
-  border-bottom: 1px solid #c4d1d3;
+  border-bottom: 1px solid #DDD5BE;
   background: var(--paper);
 }
 
@@ -241,8 +338,8 @@ body {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.8rem;
   padding: 4px 10px;
-  border: 1px solid var(--forest);
-  color: var(--forest);
+  border: 1px solid var(--accent);
+  color: var(--accent);
   border-radius: 999px;
 }
 
@@ -281,11 +378,139 @@ body {
   margin: 0;
 }
 
+/* Assistant replies and the reset recap are rendered from real markdown
+   (see renderMarkdown() in app.js), so they get normal block flow instead
+   of the pre-wrap treatment plain-text cards (user/error/thinking) use. */
+.card.assistant,
+.card.recap {
+  white-space: normal;
+}
+
+.card.assistant h1,
+.card.assistant h2,
+.card.assistant h3,
+.card.assistant h4,
+.card.recap h1,
+.card.recap h2,
+.card.recap h3,
+.card.recap h4 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.25;
+  font-family: "Newsreader", Georgia, serif;
+  font-weight: 600;
+  color: var(--ink);
+}
+.card.assistant :first-child,
+.card.recap :first-child {
+  margin-top: 0;
+}
+.card.assistant h1 { font-size: 1.28rem; }
+.card.assistant h2 { font-size: 1.14rem; }
+.card.assistant h3 { font-size: 1.02rem; }
+.card.assistant h4 { font-size: 0.96rem; }
+
+.card.assistant p,
+.card.recap p {
+  margin: 0 0 0.6em;
+}
+.card.assistant p:last-child,
+.card.recap p:last-child {
+  margin-bottom: 0;
+}
+
+.card.assistant ul,
+.card.assistant ol,
+.card.recap ul,
+.card.recap ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.25em;
+}
+.card.assistant li,
+.card.recap li {
+  margin: 0.15em 0;
+}
+
+.card.assistant blockquote,
+.card.recap blockquote {
+  margin: 0.6em 0;
+  padding: 1px 0 1px 12px;
+  border-left: 2px solid var(--accent-warm);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.card.assistant code,
+.card.recap code {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.86em;
+  background: var(--paper-dim);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.card.assistant pre,
+.card.recap pre {
+  margin: 0.6em 0;
+  padding: 12px 14px;
+  background: #15130F;
+  color: #F3EEE0;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  white-space: pre;
+}
+.card.assistant pre code,
+.card.recap pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.card.assistant table,
+.card.recap table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.87rem;
+  width: 100%;
+}
+.card.assistant th,
+.card.assistant td,
+.card.recap th,
+.card.recap td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+}
+.card.assistant th,
+.card.recap th {
+  background: var(--paper-dim);
+  font-weight: 600;
+}
+
+.card.assistant hr,
+.card.recap hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.8em 0;
+}
+
+.card.assistant a,
+.card.recap a {
+  color: var(--accent);
+  text-decoration-color: var(--border);
+  text-underline-offset: 2px;
+}
+.card.assistant a:hover,
+.card.recap a:hover {
+  text-decoration-color: currentColor;
+}
+
 .card.thinking {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #6c8994;
+  color: #8C8170;
   font-style: italic;
 }
 
@@ -297,7 +522,7 @@ body {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #6c8994;
+  background: #8C8170;
   animation: dot-bounce 1s infinite ease-in-out;
 }
 .dots span:nth-child(2) {
@@ -320,29 +545,29 @@ body {
 }
 
 .card.assistant {
-  background: #f8fbfa;
-  border: 1px solid #c4d1d3;
+  background: #FDFBF5;
+  border: 1px solid #DDD5BE;
   align-self: flex-start;
-  border-left: 3px solid var(--forest);
+  border-left: 3px solid var(--accent);
 }
 
 .card.user {
   background: var(--user-bubble);
   color: var(--user-text);
   align-self: flex-end;
-  border-left: 3px solid var(--mustard);
+  border-left: 3px solid var(--accent-warm);
 }
 
 .card.error {
-  background: #2d5265;
-  color: #f3f7f6;
+  background: #2E2019;
+  color: #F7F4EC;
   align-self: flex-start;
-  border-left: 3px solid #78a6b8;
+  border-left: 3px solid #8C4A3A;
 }
 
 .card.recap {
-  background: #eaf1ee;
-  border: 1px dashed var(--forest);
+  background: #EFEAD9;
+  border: 1px dashed var(--accent);
   align-self: center;
   font-size: 0.86rem;
   max-width: 46ch;
@@ -351,7 +576,7 @@ body {
 .recap-label {
   margin: 0 0 4px;
   font-weight: 600;
-  color: var(--forest);
+  color: var(--accent);
 }
 
 .card-meta {
@@ -370,15 +595,15 @@ body {
 }
 
 .badge.grounded {
-  background: #e4f0e8;
-  color: #2d5265;
-  border: 1px solid var(--forest);
+  background: #E9E3CF;
+  color: #5B564A;
+  border: 1px solid var(--accent);
 }
 
 .badge.tool {
   background: var(--paper);
-  color: #557887;
-  border: 1px solid #c4d1d3;
+  color: #6E6858;
+  border: 1px solid #DDD5BE;
 }
 
 .sources {
@@ -388,7 +613,7 @@ body {
 
 .sources summary {
   cursor: pointer;
-  color: var(--forest);
+  color: var(--accent);
   font-weight: 500;
 }
 
@@ -397,13 +622,13 @@ body {
   padding: 6px 8px;
   background: var(--paper-dim);
   border-radius: var(--radius);
-  color: #43606c;
+  color: #5C5647;
 }
 
 .source-code {
   font-family: "IBM Plex Mono", monospace;
   font-weight: 600;
-  color: var(--forest);
+  color: var(--accent);
   margin-right: 6px;
 }
 
@@ -411,14 +636,14 @@ body {
   display: flex;
   gap: 10px;
   padding: 18px 28px;
-  border-top: 1px solid #c4d1d3;
+  border-top: 1px solid #DDD5BE;
   background: var(--paper);
 }
 
 .composer input {
   flex: 1;
   padding: 11px 14px;
-  border: 1px solid #c4d1d3;
+  border: 1px solid #DDD5BE;
   border-radius: var(--radius);
   font-size: 0.95rem;
   font-family: inherit;
@@ -426,14 +651,14 @@ body {
 }
 
 .composer input:focus {
-  outline: 2px solid var(--forest);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
 .composer button {
   padding: 0 20px;
-  background: var(--forest);
-  color: #f3f7f6;
+  background: var(--accent);
+  color: #F7F4EC;
   border: none;
   border-radius: var(--radius);
   font-weight: 500;
@@ -441,16 +666,16 @@ body {
 }
 
 .composer button:hover {
-  background: #1d4050;
+  background: #46422F;
 }
 .composer button:disabled {
-  background: #7fa1ad;
+  background: #8C8170;
   cursor: not-allowed;
 }
 
 .loading {
   font-size: 0.8rem;
-  color: #557887;
+  color: #6E6858;
 }
 
 .hidden {
@@ -463,7 +688,7 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   padding: 12px 28px;
-  border-bottom: 1px solid #c4d1d3;
+  border-bottom: 1px solid #DDD5BE;
   background: var(--paper);
 }
 
@@ -472,26 +697,26 @@ body {
   font-size: 0.76rem;
   padding: 6px 12px;
   border-radius: 999px;
-  border: 1px solid #c4d1d3;
+  border: 1px solid #DDD5BE;
   background: #ffffff;
-  color: #557887;
+  color: #6E6858;
   cursor: pointer;
 }
 
 .mode-btn:hover {
-  border-color: var(--forest);
+  border-color: var(--accent);
 }
 
 .mode-btn.active {
-  background: var(--forest);
-  border-color: var(--forest);
-  color: #f3f7f6;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #F7F4EC;
 }
 
 .badge.mode {
-  background: #eaf1ee;
-  color: var(--forest);
-  border: 1px solid var(--forest);
+  background: #EFEAD9;
+  color: var(--accent);
+  border: 1px solid var(--accent);
 }
 
 /* ---------- v1.1: add-a-syllabus tabs (paste text / upload PDF) ---------- */
@@ -504,8 +729,8 @@ body {
 .tab-btn {
   flex: 1;
   background: transparent;
-  border: 1px solid #355d70;
-  color: #b8c9cd;
+  border: 1px solid #302C22;
+  color: #A79A82;
   padding: 6px 8px;
   border-radius: var(--radius);
   font-size: 0.76rem;
@@ -513,9 +738,9 @@ body {
 }
 
 .tab-btn.active {
-  background: var(--mustard);
-  border-color: var(--mustard);
-  color: #0a1b25;
+  background: var(--accent-warm);
+  border-color: var(--accent-warm);
+  color: #15130F;
   font-weight: 600;
 }
 
@@ -530,7 +755,7 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 0.76rem;
-  color: #b8c9cd;
+  color: #A79A82;
 }
 
 .pdf-tag {
@@ -538,8 +763,8 @@ body {
   margin-left: 6px;
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.68rem;
-  color: #0a1b25;
-  background: var(--mustard);
+  color: #15130F;
+  background: var(--accent-warm);
   padding: 1px 5px;
   border-radius: 3px;
   vertical-align: middle;
@@ -555,7 +780,7 @@ body {
   width: 7px;
   height: 1em;
   margin-left: 2px;
-  background: var(--forest);
+  background: var(--accent);
   vertical-align: text-bottom;
   animation: cursor-blink 0.9s steps(1) infinite;
 }
@@ -587,14 +812,14 @@ body {
   margin: 8px 0 0;
   font-size: 0.78rem;
   font-style: italic;
-  color: #7fa1ad;
+  color: #8C8170;
 }
 
 /* ---------- v1.1: stop button ---------- */
 #stopBtn {
   padding: 0 20px;
-  background: #78353a;
-  color: #f3f7f6;
+  background: #6B392F;
+  color: #F7F4EC;
   border: none;
   border-radius: var(--radius);
   font-weight: 500;
@@ -602,11 +827,12 @@ body {
 }
 
 #stopBtn:hover {
-  background: #8f4247;
+  background: #7A3F35;
 }
 
 @media (max-width: 720px) {
-  .app {
+  .app,
+  body.rail-collapsed .app {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
   }
@@ -614,6 +840,8 @@ body {
     flex-direction: row;
     overflow-x: auto;
     align-items: center;
+    opacity: 1;
+    pointer-events: auto;
   }
   .wordmark,
   .rail-caption {
@@ -622,152 +850,53 @@ body {
   .reset-btn {
     margin-top: 0;
   }
-}
-
-/* ---------- Feature tip index card ----------
-   Extends the rail's own "card index" language (see .course-chip above)
-   instead of reading like a generic bolted-on toast: a small tab pulls
-   up into a single index card that cycles through short feature notes.
-   Motion is limited to one load-in, a crossfade per tip change, and a
-   progress rule that mirrors real timing -- nothing decorative loops. */
-.tip-index {
-  position: fixed;
-  right: 20px;
-  bottom: 96px;
-  z-index: 40;
-}
-
-.tip-index-tab {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 1px solid var(--forest);
-  border-radius: 50%;
-  background: var(--paper);
-  box-shadow: 0 2px 8px rgba(10, 27, 37, 0.14);
-  cursor: pointer;
-}
-.tip-index-tab.visible {
-  display: flex;
-}
-.tip-index-tab-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--mustard);
-}
-
-.tip-index-card {
-  position: relative;
-  width: 272px;
-  max-width: calc(100vw - 40px);
-  padding: 12px 30px 10px 14px;
-  background: var(--paper);
-  border: 1px solid #c4d1d3;
-  border-left: 3px solid var(--mustard);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 14px rgba(10, 27, 37, 0.14);
-  animation: tip-card-in 0.35s ease-out;
-}
-.tip-index-card.hidden {
-  display: none;
-}
-
-@keyframes tip-card-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  /* Collapse/resize is a desktop convenience -- the rail is already a
+     compact horizontal strip on small screens, so hide the controls
+     rather than fight the row-based layout above. */
+  .rail-resize-handle,
+  .rail-collapse-btn,
+  .rail-expand-tab {
+    display: none !important;
   }
 }
 
-.tip-index-close {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  color: #7fa1ad;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-.tip-index-close:hover {
-  color: var(--ink);
-}
-
-.tip-index-text {
-  margin: 0;
-  min-height: 2.6em;
-  font-size: 0.83rem;
-  line-height: 1.45;
-  color: var(--ink);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-}
-.tip-index-text.swap {
-  opacity: 0;
-  transform: translateY(4px);
-}
-
-.tip-index-footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.tip-index-count {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.68rem;
-  color: #7c97a1;
-  white-space: nowrap;
-}
-
-.tip-index-progress {
-  flex: 1;
-  height: 2px;
+/* ---------- Tip strip ----------
+   A thin, ghosted line that sits just above the composer and cycles
+   through a handful of feature tips once per browser, then quietly
+   collapses away -- not a persistent widget, just a brief orientation
+   pass for a first-time visitor. */
+.tip-strip {
+  padding: 0 28px;
+  max-height: 34px;
+  opacity: 1;
   overflow: hidden;
-  background: var(--paper-dim);
-  border-radius: 2px;
+  background: var(--paper);
+  transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
 }
-.tip-index-progress span {
-  display: block;
-  width: 0%;
-  height: 100%;
-  background: var(--mustard);
+.tip-strip.done {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
-@keyframes tip-progress-fill {
-  from {
-    width: 0%;
-  }
-  to {
-    width: 100%;
-  }
+.tip-strip-text {
+  display: inline-block;
+  padding: 8px 0;
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--text-muted);
+  opacity: 0.6;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.tip-strip-text.swap {
+  opacity: 0;
+  transform: translateY(3px);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tip-index-card,
-  .tip-index-text,
-  .tip-index-progress span {
-    animation: none !important;
+  .tip-strip,
+  .tip-strip-text {
     transition: none !important;
-  }
-}
-
-@media (max-width: 720px) {
-  .tip-index {
-    right: 12px;
-    bottom: 84px;
-  }
-  .tip-index-card {
-    width: 240px;
   }
 }

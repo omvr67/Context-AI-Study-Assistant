@@ -51,15 +51,25 @@ const TOOL_LABELS = {
   build_ai_study_plan: "🗓️ Auto-built study plan",
 };
 
-function renderMarkdown(text) {
-  const escaped = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+// Real markdown rendering (headings, lists, code blocks, tables, quotes,
+// links, bold/italic) via vendored marked + DOMPurify -- see
+// frontend/vendor/. Falls back to the old escape-and-<br> behavior if
+// either vendor script failed to load, so a rendering hiccup can't take
+// the whole chat down.
+if (typeof marked !== "undefined") {
+  marked.setOptions({ gfm: true, breaks: true });
+}
 
-  return escaped
-    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\n/g, "<br>");
+function renderMarkdown(text) {
+  if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\n/g, "<br>");
+  }
+  const rawHtml = marked.parse(text);
+  return DOMPurify.sanitize(rawHtml);
 }
 
 function addCard(role, text) {
@@ -91,7 +101,7 @@ function addThinkingCard() {
 function startStreamingCard() {
   const card = document.createElement("div");
   card.className = "card assistant streaming";
-  card.innerHTML = `<span class="streamed-text"></span><span class="stream-cursor"></span>`;
+  card.innerHTML = `<div class="streamed-text"></div><span class="stream-cursor"></span>`;
   thread.appendChild(card);
   thread.scrollTop = thread.scrollHeight;
   card._fullText = "";
@@ -101,7 +111,12 @@ function startStreamingCard() {
 function appendStreamToken(card, text) {
   card._fullText += text;
   const textEl = card.querySelector(".streamed-text");
+  const cursor = card.querySelector(".stream-cursor");
   textEl.innerHTML = renderMarkdown(card._fullText);
+  // Keep the cursor flowing right after the last rendered character,
+  // wherever that now lives (end of a paragraph, a list item, etc.)
+  // rather than parked after the whole block.
+  if (cursor) textEl.appendChild(cursor);
   thread.scrollTop = thread.scrollHeight;
 }
 

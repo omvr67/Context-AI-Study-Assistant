@@ -1,13 +1,11 @@
 /**
- * Feature tip index card -- a small, dismissible rotating tip widget in
- * the bottom-right corner, styled after the app's own "card index"
- * language (see the course chips in style.css). Not a generic toast:
- * it reads like flipping through a card catalog of what the assistant
- * can do, which doubles as a quick feature tour during a live demo.
+ * Tip strip -- a thin, ghosted line above the composer that cycles once
+ * through a handful of feature tips, then collapses away and doesn't
+ * come back on later visits. Not a persistent widget: just a brief
+ * orientation pass for a first-time visitor.
  *
  * Fully self-contained and independent of app.js -- it only reads/writes
- * its own localStorage key and never touches chat state, so it can be
- * dropped in or pulled out without touching the chat logic at all.
+ * its own localStorage key and never touches chat state.
  */
 (() => {
   const TIPS = [
@@ -21,101 +19,53 @@
     "If it's not in the syllabus, the answer says so instead of making something up.",
   ];
 
-  const ROTATE_MS = 7000;
+  const ROTATE_MS = 6000;
   const SWAP_MS = 250;
-  const STORAGE_KEY = "connectx_tip_index_collapsed";
+  const SEEN_KEY = "connectx_tips_seen";
 
-  const card = document.getElementById("tipIndexCard");
-  const tab = document.getElementById("tipIndexTab");
-  const closeBtn = document.getElementById("tipIndexClose");
-  const textEl = document.getElementById("tipIndexText");
-  const countEl = document.getElementById("tipIndexCount");
-  const progressFill = document.getElementById("tipIndexProgressFill");
+  const strip = document.getElementById("tipStrip");
+  const textEl = document.getElementById("tipStripText");
 
-  // If any expected element is missing, bail out quietly rather than
-  // throwing -- this widget is decorative and should never be able to
-  // break the rest of the page.
-  if (!card || !tab || !closeBtn || !textEl || !countEl || !progressFill) return;
+  // Decorative feature -- if the markup isn't there, bail out quietly.
+  if (!strip || !textEl) return;
 
-  let index = 0;
-  let timer = null;
-
-  function renderTip() {
-    textEl.textContent = TIPS[index];
-    countEl.textContent = `${index + 1} / ${TIPS.length}`;
+  let alreadySeen = false;
+  try {
+    alreadySeen = localStorage.getItem(SEEN_KEY) === "1";
+  } catch (e) {
+    /* private browsing or storage disabled -- default to showing once */
   }
 
-  function swapTip() {
+  if (alreadySeen) {
+    strip.classList.add("done");
+    return;
+  }
+
+  let index = 0;
+  textEl.textContent = TIPS[0];
+
+  function finish() {
+    strip.classList.add("done");
+    try {
+      localStorage.setItem(SEEN_KEY, "1");
+    } catch (e) {
+      /* ignore -- worst case it shows once more on a later visit */
+    }
+  }
+
+  function showNext() {
+    index += 1;
+    if (index >= TIPS.length) {
+      clearInterval(timer);
+      finish();
+      return;
+    }
     textEl.classList.add("swap");
     setTimeout(() => {
-      index = (index + 1) % TIPS.length;
-      renderTip();
+      textEl.textContent = TIPS[index];
       textEl.classList.remove("swap");
     }, SWAP_MS);
   }
 
-  function restartProgress() {
-    // Reset-then-reflow-then-reapply is the standard trick for
-    // re-triggering a CSS animation on the same element.
-    progressFill.style.animation = "none";
-    void progressFill.offsetWidth;
-    progressFill.style.animation = `tip-progress-fill ${ROTATE_MS}ms linear forwards`;
-  }
-
-  function startRotation() {
-    stopRotation();
-    restartProgress();
-    timer = setInterval(() => {
-      swapTip();
-      restartProgress();
-    }, ROTATE_MS);
-  }
-
-  function stopRotation() {
-    if (timer) clearInterval(timer);
-    timer = null;
-  }
-
-  function collapse(persist) {
-    card.classList.add("hidden");
-    tab.classList.add("visible");
-    stopRotation();
-    if (persist) {
-      try {
-        localStorage.setItem(STORAGE_KEY, "1");
-      } catch (e) {
-        /* private browsing or storage disabled -- fine, just won't persist */
-      }
-    }
-  }
-
-  function expand() {
-    card.classList.remove("hidden");
-    tab.classList.remove("visible");
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {
-      /* ignore */
-    }
-    startRotation();
-  }
-
-  closeBtn.addEventListener("click", () => collapse(true));
-  tab.addEventListener("click", expand);
-
-  renderTip();
-
-  let startCollapsed = false;
-  try {
-    startCollapsed = localStorage.getItem(STORAGE_KEY) === "1";
-  } catch (e) {
-    /* ignore -- default to shown */
-  }
-
-  if (startCollapsed) {
-    card.classList.add("hidden");
-    tab.classList.add("visible");
-  } else {
-    startRotation();
-  }
+  const timer = setInterval(showNext, ROTATE_MS);
 })();

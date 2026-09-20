@@ -6,7 +6,7 @@
   <title>Context AI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
-    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Roboto+Slab:wght@600;700&family=Inter:wght@400;500&display=swap"
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Newsreader:ital,wght@1,500;1,600&family=Inter:wght@400;500&display=swap"
     rel="stylesheet"
   />
   <link rel="stylesheet" href="style.css" />
@@ -14,8 +14,14 @@
 <body>
   <div class="app">
     <aside class="rail">
-      <h1 class="wordmark">Context AI   </h1>
-      <h1 class="wordmark">     </h1>
+      <button
+        class="rail-collapse-btn"
+        id="railCollapseBtn"
+        type="button"
+        aria-expanded="true"
+        title="Collapse sidebar"
+      >&lsaquo;</button>
+      <h1 class="wordmark">Context AI</h1>
       <p class="rail-caption">Your Syllabus & Exam Assistant &middot; Grounded RAG + Tools &middot; PDF uploads now added &middot; v1.1</p>
       <div class="course-list" id="courseList">
         <p class="loading">Loading courses&hellip;</p>
@@ -63,6 +69,8 @@
       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
     </aside>
 
+    <div class="rail-resize-handle" id="railResizeHandle" title="Drag to resize"></div>
+
     <main class="deck">
       <header class="deck-header">
         <span class="tab" id="activeCourseTab">All courses</span>
@@ -86,6 +94,10 @@
         </div>
       </div>
 
+      <div class="tip-strip" id="tipStrip" aria-live="polite">
+        <span class="tip-strip-text" id="tipStripText"></span>
+      </div>
+
       <form class="composer" id="composer">
         <input
           id="messageInput"
@@ -99,28 +111,18 @@
     </main>
   </div>
 
-  <aside class="tip-index" id="tipIndex">
-    <button
-      class="tip-index-tab"
-      id="tipIndexTab"
-      type="button"
-      aria-expanded="true"
-      aria-controls="tipIndexCard"
-      title="Feature tips"
-    >
-      <span class="tip-index-tab-dot"></span>
-    </button>
-    <div class="tip-index-card" id="tipIndexCard">
-      <button class="tip-index-close" id="tipIndexClose" type="button" aria-label="Hide tips">&times;</button>
-      <p class="tip-index-text" id="tipIndexText" aria-live="polite"></p>
-      <div class="tip-index-footer">
-        <span class="tip-index-count" id="tipIndexCount"></span>
-        <div class="tip-index-progress"><span id="tipIndexProgressFill"></span></div>
-      </div>
-    </div>
-  </aside>
+  <button
+    class="rail-expand-tab"
+    id="railExpandTab"
+    type="button"
+    aria-hidden="true"
+    title="Show sidebar"
+  >&rsaquo;</button>
 
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
   <script src="app.js"></script>
+  <script src="sidebar.js"></script>
   <script src="tips.js"></script>
 </body>
 </html>
