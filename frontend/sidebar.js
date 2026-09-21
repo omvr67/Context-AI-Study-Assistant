@@ -65,6 +65,7 @@
 
   handle.addEventListener("pointerdown", (e) => {
     if (document.body.classList.contains("rail-collapsed")) return;
+    e.preventDefault();
     dragging = true;
     handle.setPointerCapture(e.pointerId);
     document.body.classList.add("rail-resizing");
@@ -72,6 +73,7 @@
 
   handle.addEventListener("pointermove", (e) => {
     if (!dragging) return;
+    e.preventDefault();
     applyWidth(e.clientX);
   });
 

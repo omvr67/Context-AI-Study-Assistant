@@ -43,6 +43,8 @@ body.rail-collapsed .app {
 
 body.rail-resizing .app {
   transition: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* ---------- Left rail: course tabs, styled like a card index ---------- */
@@ -66,23 +68,21 @@ body.rail-collapsed .rail {
 
 .rail-collapse-btn {
   position: absolute;
-  top: 26px;
-  right: 14px;
-  width: 22px;
-  height: 22px;
+  top: 28px;
+  right: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--accent);
-  border-radius: 50%;
+  border: none;
   background: transparent;
   color: var(--rail-text);
-  font-size: 0.72rem;
-  line-height: 1;
+  padding: 0;
+  margin: 0;
   cursor: pointer;
+  transition: color 0.15s ease;
 }
+
 .rail-collapse-btn:hover {
-  border-color: var(--accent-warm);
   color: var(--accent-warm);
 }
 
@@ -109,35 +109,35 @@ body.rail-collapsed .rail-resize-handle {
   pointer-events: none;
 }
 
-/* Small tab that re-opens a collapsed rail */
+/* 3-bar menu icon that re-opens the collapsed sidebar */
 .rail-expand-tab {
   display: none;
   position: fixed;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 20px;
-  height: 44px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-left: none;
-  border-radius: 0 4px 4px 0;
-  background: var(--paper);
-  color: var(--text-muted);
-  font-size: 0.72rem;
+  top: 20px;
+  left: 20px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  padding: 0;
+  margin: 0;
   cursor: pointer;
   z-index: 30;
-  box-shadow: 2px 0 8px rgba(21, 19, 15, 0.1);
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease;
 }
+
 body.rail-collapsed .rail-expand-tab {
   display: flex;
 }
+
 .rail-expand-tab:hover {
   color: var(--accent-warm);
-  border-color: var(--accent-warm);
 }
 
+body.rail-collapsed .deck-header {
+  padding-left: 52px;
+}
 .wordmark {
   font-family: "Newsreader", Georgia, serif;
   font-style: italic;

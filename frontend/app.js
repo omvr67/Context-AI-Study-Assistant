@@ -210,7 +210,7 @@ function renderChip(course, isAll) {
     chip.classList.add("active");
     activeCourse = isAll ? null : course.course_code;
     activeCourseTab.textContent = isAll
-      ? "All courses"
+      ? "All Courses"
       : `${course.course_code} — ${course.course_name}`;
   });
   chip.appendChild(main);
@@ -231,7 +231,7 @@ function renderChip(course, isAll) {
         if (!res.ok) throw new Error(`status ${res.status}`);
         if (activeCourse === course.course_code) {
           activeCourse = null;
-          activeCourseTab.textContent = "All courses";
+          activeCourseTab.textContent = "All Courses";
         }
         loadCourses();
       } catch (err) {
@@ -251,7 +251,7 @@ async function loadCourses() {
     const courses = await res.json();
 
     courseList.innerHTML = "";
-    courseList.appendChild(renderChip({ course_code: "ALL", course_name: "All courses" }, true));
+    courseList.appendChild(renderChip({ course_code: "ALL", course_name: "All Courses" }, true));
     for (const course of courses) {
       courseList.appendChild(renderChip(course, false));
     }
