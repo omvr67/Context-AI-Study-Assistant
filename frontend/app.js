@@ -5,6 +5,30 @@ let activeCourse = null; // null = search across all courses
 let currentMode = "";    // "" = normal, or "eli5" | "exam" | "teach"
 let activeController = null; // AbortController for the in-flight stream, if any
 
+// Identifies this browser for the private notebook feature (see
+// backend/notebook_store.py) -- generated once and kept in localStorage so
+// notebook uploads survive a page reload but never leave this device. Not
+// an auth token: it's the entire basis for keeping one device's notebook
+// away from every other device, so it's sent as plain request data, never
+// something the model can see or set itself (see backend/tools.py's
+// make_notebook_tool).
+function getOrCreateDeviceId() {
+  const KEY = "connectx_device_id";
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch (e) {
+    // Private browsing or storage disabled -- fall back to a per-tab id.
+    // The notebook feature just won't persist across a reload in that case.
+    return crypto.randomUUID();
+  }
+}
+const deviceId = getOrCreateDeviceId();
+
 const thread = document.getElementById("thread");
 const composer = document.getElementById("composer");
 const messageInput = document.getElementById("messageInput");
@@ -35,6 +59,14 @@ const pdfCourseName = document.getElementById("pdfCourseName");
 const pdfFile = document.getElementById("pdfFile");
 const pdfAppend = document.getElementById("pdfAppend");
 
+const notebookList = document.getElementById("notebookList");
+const addNotebookBtn = document.getElementById("addNotebookBtn");
+const addNotebookForm = document.getElementById("addNotebookForm");
+const addNotebookStatus = document.getElementById("addNotebookStatus");
+const cancelAddNotebook = document.getElementById("cancelAddNotebook");
+const notebookTitle = document.getElementById("notebookTitle");
+const notebookFile = document.getElementById("notebookFile");
+
 // Rotated randomly so repeated questions don't feel like a canned response.
 const THINKING_PHRASES = [
   "Checking the syllabus…",
@@ -45,6 +77,7 @@ const THINKING_PHRASES = [
 
 const TOOL_LABELS = {
   search_syllabus: "📖 Searched syllabus",
+  search_notebook: "📓 Searched notebook",
   gpa_impact_simulator: "🧮 Calculated GPA",
   gpa_target_planner: "🎯 Planned target GPA",
   generate_study_schedule: "🗓️ Built a schedule",
@@ -260,6 +293,65 @@ async function loadCourses() {
   }
 }
 
+// --- Notebook: private-per-device PDFs, separate from the shared course
+// list above -- see backend/notebook_store.py. Reuses the same .course-chip
+// styling (just its own list/click behavior: clicking a notebook doc has
+// no "search this one" filter the way a course chip does, since
+// search_notebook always searches the whole notebook), with every entry
+// deletable since none of them are built-in.
+
+function renderNotebookChip(doc) {
+  const chip = document.createElement("div");
+  chip.className = "course-chip";
+
+  const main = document.createElement("div");
+  main.className = "course-chip-main";
+  main.innerHTML = `<span class="code">📓 ${doc.page_count} page${doc.page_count === 1 ? "" : "s"}</span><span class="name">${doc.title}</span>`;
+  chip.appendChild(main);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "course-chip-delete";
+  del.title = `Remove ${doc.title} from your notebook`;
+  del.textContent = "×";
+  del.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Remove "${doc.title}" from your notebook?`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/notebook/${encodeURIComponent(doc.doc_id)}?device_id=${encodeURIComponent(deviceId)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      loadNotebook();
+    } catch (err) {
+      alert("Couldn't remove that document — is the backend running?");
+    }
+  });
+  chip.appendChild(del);
+
+  return chip;
+}
+
+async function loadNotebook() {
+  try {
+    const res = await fetch(`${API_BASE}/notebook?device_id=${encodeURIComponent(deviceId)}`);
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const docs = await res.json();
+
+    notebookList.innerHTML = "";
+    if (!docs.length) {
+      notebookList.innerHTML = `<p class="loading">Nothing here yet — add a PDF below.</p>`;
+      return;
+    }
+    for (const doc of docs) {
+      notebookList.appendChild(renderNotebookChip(doc));
+    }
+  } catch (err) {
+    notebookList.innerHTML = `<p class="loading">Couldn't reach the backend at ${API_BASE}. Is uvicorn running?</p>`;
+  }
+}
+
 // --- Sending a message, streamed ----------------------------------------
 
 function setSending(isSending) {
@@ -289,6 +381,7 @@ async function sendMessage(message) {
         message,
         course_code: activeCourse,
         mode: currentMode || null,
+        device_id: deviceId,
       }),
       signal: activeController.signal,
     });
@@ -537,4 +630,64 @@ addCoursePdfForm.addEventListener("submit", async (e) => {
   }
 });
 
+// --- My Notebook panel: upload/cancel/delete -------------------------------
+// Same form shape as the course-PDF upload above, but posts to /notebook
+// with this browser's device_id instead of a shared course_code -- see
+// backend/notebook_store.py.
+
+addNotebookBtn.addEventListener("click", () => {
+  addNotebookForm.classList.toggle("hidden");
+  addNotebookStatus.textContent = "";
+});
+
+cancelAddNotebook.addEventListener("click", () => {
+  addNotebookForm.classList.add("hidden");
+  addNotebookForm.reset();
+  addNotebookStatus.textContent = "";
+});
+
+addNotebookForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const title = notebookTitle.value.trim();
+  const file = notebookFile.files[0];
+
+  if (!title || !file) {
+    addNotebookStatus.textContent = "Give it a title and choose a PDF.";
+    addNotebookStatus.className = "add-course-status error";
+    return;
+  }
+  if (!file.name.toLowerCase().endsWith(".pdf")) {
+    addNotebookStatus.textContent = "Please choose a .pdf file.";
+    addNotebookStatus.className = "add-course-status error";
+    return;
+  }
+
+  addNotebookStatus.textContent = "Uploading & indexing…";
+  addNotebookStatus.className = "add-course-status";
+
+  const formData = new FormData();
+  formData.append("device_id", deviceId);
+  formData.append("title", title);
+  formData.append("file", file);
+
+  try {
+    const res = await fetch(`${API_BASE}/notebook/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
+
+    addNotebookStatus.textContent = `${data.title} indexed (${data.page_count || 0} page(s)).`;
+    addNotebookStatus.className = "add-course-status success";
+    addNotebookForm.reset();
+    setTimeout(() => addNotebookForm.classList.add("hidden"), 1200);
+    loadNotebook();
+  } catch (err) {
+    addNotebookStatus.textContent = err.message;
+    addNotebookStatus.className = "add-course-status error";
+  }
+});
+
 loadCourses();
+loadNotebook();

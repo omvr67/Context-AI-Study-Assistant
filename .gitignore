@@ -19,3 +19,7 @@ backend/custom_syllabi.json
 
 # Locally added syllabi (per-student, not part of the demo dataset)
 backend/custom_syllabi.json
+
+# Private per-device notebook uploads (see backend/notebook_store.py) --
+# personal to whoever's running the server locally, not shared demo data
+backend/notebook_docs.json

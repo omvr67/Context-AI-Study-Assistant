@@ -27,6 +27,13 @@ v1.1 additions:
     from its source of truth (data.py / custom_syllabi.json) rather than
     via chunk search -- used by tools (build_ai_study_plan) that need the
     whole document, since chunk search can fragment or miss a topic list.
+
+v1.2 addition:
+  - add_notebook_doc_to_vectorstore(): indexes a private, per-device
+    notebook PDF into this same store, tagged with device_id + notebook=True
+    so it can only ever surface through search_notebook's own metadata
+    filter (see backend/tools.py and backend/notebook_store.py) -- never
+    through search_syllabus, and never for a different device.
 """
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -166,6 +173,35 @@ def add_pdf_course_to_vectorstore(
                 "course_name": course_name,
                 "custom": True,
                 "source": "pdf",
+                "page": p["page"],
+            },
+        )
+        for p in pages
+    ]
+    chunks = _splitter().split_documents(page_docs)
+    return vectorstore.add_documents(chunks)
+
+
+def add_notebook_doc_to_vectorstore(
+    vectorstore: FAISS, device_id: str, doc_id: str, title: str, pages: list[dict]
+) -> list[str]:
+    """Chunks + embeds one private notebook PDF and adds it to the live
+    index, tagged with device_id + notebook=True so search_notebook's
+    metadata filter -- and only that filter -- can ever surface it (see
+    tools.make_notebook_tool). Keeps each chunk's page number, same as
+    add_pdf_course_to_vectorstore, so notebook citations can read "p.N"
+    too. Returns the new chunk ids so the caller can track them for later
+    removal, same convention as the course-upload path.
+    """
+    page_docs = [
+        Document(
+            page_content=p["text"],
+            metadata={
+                "course_code": title,
+                "course_name": title,
+                "device_id": device_id,
+                "doc_id": doc_id,
+                "notebook": True,
                 "page": p["page"],
             },
         )

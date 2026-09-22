@@ -52,9 +52,14 @@ worth 35% of your grade") instead of just tagging it on at the end.
 Rules you must always follow:
 1. For any question about grading breakdowns, exam dates, attendance policy, or lecture topics, call the
    search_syllabus tool before answering. Never answer syllabus questions from memory alone.
-2. If search_syllabus returns "NOT_FOUND" or content that does not actually answer the question, respond
-   exactly with: "I don't see that in the syllabus -- please check with your Teaching Assistant." Do not
-   guess or fall back on outside knowledge.
+2. A search_notebook tool may also be available this turn -- a private space for PDFs only this student
+   has personally uploaded, kept separate from the shared syllabi above. If it's available and the
+   student references "my notes", "the PDF I uploaded", "my practice exam", or similar, use it directly.
+   If search_syllabus comes back NOT_FOUND for something and search_notebook is available, try that too
+   before giving up -- it may be covered there instead. Only once both come back empty (or
+   search_notebook isn't available at all) should you respond exactly with: "I don't see that in the
+   syllabus -- please check with your Teaching Assistant." Do not guess or fall back on outside knowledge
+   either way.
 3. When a student asks about their GPA or how a grade would affect it, call the gpa_impact_simulator tool
    directly. When a student states a *target* GPA and asks what grades they'd need, call
    gpa_target_planner instead. Don't call search_syllabus first unless they're also asking about a
@@ -241,6 +246,21 @@ class SyllabusAssistantAgent:
             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
         return self._sessions[session_id]
 
+    def _tools_for_call(self, extra_tools):
+        """Resolves the (bound-LLM, tools_map) pair to use for one call.
+
+        Most turns reuse the precomputed self.llm_with_tools / self.tools_map
+        built once at construction time. When extra_tools is given (e.g. a
+        request-scoped search_notebook tool -- see backend/tools.py's
+        make_notebook_tool and its call site in backend/main.py), a fresh
+        bind is built for just this call instead, so a per-request tool
+        never leaks into another session's tool set.
+        """
+        if not extra_tools:
+            return self.llm_with_tools, self.tools_map
+        combined = list(self.tools_map.values()) + list(extra_tools)
+        return self.llm.bind_tools(combined), {**self.tools_map, **{t.name: t for t in extra_tools}}
+
     @staticmethod
     def _with_mode(history: list, mode_prompt: str | None) -> list:
         """Builds the message list actually sent to the LLM for one call:
@@ -285,8 +305,12 @@ class SyllabusAssistantAgent:
         except Exception:
             return None
 
-    def chat(self, session_id: str, user_input: str, mode: str | None = None) -> dict:
+    def chat(self, session_id: str, user_input: str, mode: str | None = None, extra_tools=None) -> dict:
         """Runs one turn of the ReAct loop.
+
+        extra_tools: optional request-scoped tools (e.g. a device-bound
+        search_notebook) that apply to this call only -- see
+        _tools_for_call. Never persisted into the session's own tool set.
 
         Returns {"content": str, "sources": list[dict], "tools_used": list[str],
         "mode": str | None} instead of a bare string so the API layer can
@@ -302,13 +326,15 @@ class SyllabusAssistantAgent:
         mode_key = (mode or "").strip().lower()
         mode_prompt = MODE_PROMPTS.get(mode_key)
 
+        llm_with_tools, tools_map = self._tools_for_call(extra_tools)
+
         tools_used: list[str] = []
         sources: list[dict] = []
 
         for _ in range(self.max_turns):
             call_messages = self._with_mode(history, mode_prompt)
             try:
-                ai_msg: AIMessage = _invoke_with_backoff(self.llm_with_tools.invoke, call_messages)
+                ai_msg: AIMessage = _invoke_with_backoff(llm_with_tools.invoke, call_messages)
             except Exception as e:
                 content = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Sorry, I hit an error talking to the model: {e}"
                 return {
@@ -330,13 +356,13 @@ class SyllabusAssistantAgent:
 
             for tool_call in ai_msg.tool_calls:
                 name = tool_call["name"]
-                tool_obj = self.tools_map.get(name)
+                tool_obj = tools_map.get(name)
                 if tool_obj is None:
                     observation = f"Error: tool '{name}' is not registered."
                 else:
                     observation = tool_obj.invoke(tool_call["args"])
                     tools_used.append(name)
-                    if name == "search_syllabus":
+                    if name in ("search_syllabus", "search_notebook"):
                         sources.extend(_parse_sources(str(observation)))
                 history.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
 
@@ -347,10 +373,13 @@ class SyllabusAssistantAgent:
             "mode": mode_key or None,
         }
 
-    def chat_stream(self, session_id: str, user_input: str, mode: str | None = None):
+    def chat_stream(self, session_id: str, user_input: str, mode: str | None = None, extra_tools=None):
         """Generator twin of chat(): yields small event dicts as the turn
         progresses instead of returning one final dict, so the API layer can
         forward them to the client live over SSE.
+
+        extra_tools: same meaning as in chat() -- request-scoped tools
+        (e.g. a device-bound search_notebook) applying to this call only.
 
         Event shapes:
           {"type": "tool", "name": ...}                                  -- a tool started running
@@ -382,6 +411,8 @@ class SyllabusAssistantAgent:
         mode_key = (mode or "").strip().lower()
         mode_prompt = MODE_PROMPTS.get(mode_key)
 
+        llm_with_tools, tools_map = self._tools_for_call(extra_tools)
+
         tools_used: list[str] = []
         sources: list[dict] = []
 
@@ -391,7 +422,7 @@ class SyllabusAssistantAgent:
             chunks = []
 
             try:
-                for chunk in _stream_with_backoff(self.llm_with_tools.stream, call_messages):
+                for chunk in _stream_with_backoff(llm_with_tools.stream, call_messages):
                     chunks.append(chunk)
                     if is_tool_turn is None:
                         is_tool_turn = bool(getattr(chunk, "tool_call_chunks", None))
@@ -425,13 +456,13 @@ class SyllabusAssistantAgent:
             for tool_call in ai_msg.tool_calls:
                 name = tool_call["name"]
                 yield {"type": "tool", "name": name}
-                tool_obj = self.tools_map.get(name)
+                tool_obj = tools_map.get(name)
                 if tool_obj is None:
                     observation = f"Error: tool '{name}' is not registered."
                 else:
                     observation = tool_obj.invoke(tool_call["args"])
                     tools_used.append(name)
-                    if name == "search_syllabus":
+                    if name in ("search_syllabus", "search_notebook"):
                         sources.extend(_parse_sources(str(observation)))
                 history.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
 

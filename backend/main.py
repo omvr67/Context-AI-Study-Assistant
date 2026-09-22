@@ -10,6 +10,13 @@ plain FastAPI() app instance. Run from the project root with:
 v1.1 additions: POST /courses/upload (PDF ingestion) and POST /chat/stream
 (SSE streaming chat) -- see their docstrings below for details.
 
+v1.3 addition: GET/POST/DELETE /notebook* -- a private, per-device PDF
+notebook separate from the shared course library above (see
+backend/notebook_store.py). ChatRequest.device_id, when present, binds a
+request-scoped search_notebook tool for that one call (see
+backend/tools.py's make_notebook_tool) so the agent can search a device's
+own notebook without ever being able to search anyone else's.
+
 Rate-limiting addition: both /chat and /chat/stream are throttled per
 visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
 IP) before the agent is ever called, and every Groq call inside the
@@ -31,18 +38,21 @@ from .models import (
     ChatRequest,
     ChatResponse,
     CourseInfo,
+    NotebookDocInfo,
     ResetResponse,
     SourceChunk,
 )
+from .notebook_store import add_notebook_doc, load_all_notebook_docs, load_notebook_docs, remove_notebook_doc
 from .pdf_ingest import PDFValidationError, extract_pdf_pages
 from .rag import (
     add_course_to_vectorstore,
+    add_notebook_doc_to_vectorstore,
     add_pdf_course_to_vectorstore,
     build_syllabus_vectorstore,
     remove_course_from_vectorstore,
 )
 from .rate_limit import check_and_increment
-from .tools import make_tools  # imports function that creates the tools used
+from .tools import make_notebook_tool, make_tools  # imports functions that create the tools used
 
 # ---------------------------------------------------------------------------
 # Startup: build the vector store, tools, and agent once when the app boots.
@@ -64,6 +74,19 @@ llm = ChatGroq(  # creates the LM interface
 # student has already saved locally via POST /courses or /courses/upload on
 # a previous run.
 vectorstore, course_chunk_ids = build_syllabus_vectorstore()
+
+# Private per-device notebook: re-index every device's saved uploads (see
+# backend/notebook_store.py) into this same live FAISS store, tagged with
+# device_id + notebook=True so they can only ever surface through
+# search_notebook's own metadata filter -- never through search_syllabus,
+# and never for a device other than the one that uploaded them.
+notebook_chunk_ids: dict[str, list[str]] = {}  # doc_id -> chunk ids
+for _device_id, _docs in load_all_notebook_docs().items():
+    for _doc in _docs:
+        notebook_chunk_ids[_doc["doc_id"]] = add_notebook_doc_to_vectorstore(
+            vectorstore, _device_id, _doc["doc_id"], _doc["title"], _doc["pages"]
+        )
+
 tools = make_tools(vectorstore)
 agent = SyllabusAssistantAgent(llm=llm, tools=tools)
 
@@ -112,6 +135,19 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _require_device_id(device_id: str | None) -> str:
+    """Every /notebook endpoint needs a real device_id -- there's no auth
+    system here, so this client-generated id (see frontend/app.js) is the
+    entire basis for keeping one device's private uploads away from every
+    other device. An empty one is rejected outright rather than silently
+    falling back to some shared bucket.
+    """
+    device_id = (device_id or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=422, detail="device_id is required")
+    return device_id
+
+
 # Backend security check
 @app.get("/")
 def health_check():
@@ -119,6 +155,7 @@ def health_check():
         "status": "ok",
         "service": "syllabus-exam-assistant",
         "courses_indexed": len(course_chunk_ids),
+        "notebook_docs_indexed": len(notebook_chunk_ids),
     }
 
 
@@ -229,6 +266,76 @@ def delete_course(course_code: str):
     return {"status": "deleted", "course_code": code}
 
 
+# --- Private per-device notebook -------------------------------------------
+# Separate from the shared course library above: a device_id generated and
+# stored client-side (see frontend/app.js) scopes every one of these
+# endpoints, and the same id is threaded through to make_notebook_tool at
+# chat time so an uploaded PDF is only ever searchable by the device that
+# uploaded it -- see backend/notebook_store.py and backend/tools.py.
+
+@app.get("/notebook", response_model=list[NotebookDocInfo])
+def list_notebook(device_id: str = Query(...)):
+    device_id = _require_device_id(device_id)
+    return [
+        NotebookDocInfo(doc_id=d["doc_id"], title=d["title"], page_count=d.get("page_count", len(d.get("pages", []))))
+        for d in load_notebook_docs(device_id)
+    ]
+
+
+@app.post("/notebook/upload", response_model=NotebookDocInfo, status_code=201)
+async def upload_notebook_pdf(
+    device_id: str = Form(...),
+    title: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Uploads a private PDF to the caller's own notebook. Indexed into the
+    same live FAISS store the shared courses use, but tagged with this
+    device_id so it's only ever found by a search_notebook call made on
+    this device's behalf -- never by search_syllabus, and never by another
+    device's notebook search. No restart needed; it's searchable immediately.
+    """
+    device_id = _require_device_id(device_id)
+    doc_title = title.strip()
+    if not doc_title:
+        raise HTTPException(status_code=422, detail="title is required")
+
+    filename = (file.filename or "").lower()
+    if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+
+    data = await file.read()
+    try:
+        pages = extract_pdf_pages(data)
+    except PDFValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    saved = add_notebook_doc(device_id, doc_title, pages)
+    notebook_chunk_ids[saved["doc_id"]] = add_notebook_doc_to_vectorstore(
+        vectorstore, device_id, saved["doc_id"], doc_title, pages
+    )
+
+    return NotebookDocInfo(doc_id=saved["doc_id"], title=doc_title, page_count=saved["page_count"])
+
+
+@app.delete("/notebook/{doc_id}")
+def delete_notebook_doc(doc_id: str, device_id: str = Query(...)):
+    device_id = _require_device_id(device_id)
+
+    # Ownership check happens against the store itself, before touching
+    # anything else -- a doc_id that exists but belongs to a different
+    # device_id is treated identically to one that doesn't exist at all,
+    # so this response can never confirm or deny another device's upload.
+    owned_ids = {d["doc_id"] for d in load_notebook_docs(device_id)}
+    if doc_id not in owned_ids:
+        raise HTTPException(status_code=404, detail=f"No notebook document '{doc_id}' found")
+
+    remove_notebook_doc(device_id, doc_id)
+    ids = notebook_chunk_ids.pop(doc_id, None)
+    if ids:
+        remove_course_from_vectorstore(vectorstore, ids)
+    return {"status": "deleted", "doc_id": doc_id}
+
+
 def _prefixed_input(req: ChatRequest) -> str:
     user_input = req.message
     if req.course_code:
@@ -249,7 +356,8 @@ def chat(req: ChatRequest, request: Request):
             detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
         )
 
-    result = agent.chat(session_id=req.session_id, user_input=_prefixed_input(req), mode=req.mode)
+    extra_tools = [make_notebook_tool(vectorstore, req.device_id)] if req.device_id else None
+    result = agent.chat(session_id=req.session_id, user_input=_prefixed_input(req), mode=req.mode, extra_tools=extra_tools)
     return ChatResponse(
         session_id=req.session_id,
         response=result["content"],
@@ -293,10 +401,11 @@ def chat_stream(req: ChatRequest, request: Request):
         )
 
     user_input = _prefixed_input(req)
+    extra_tools = [make_notebook_tool(vectorstore, req.device_id)] if req.device_id else None
 
     def event_stream():
         try:
-            for event in agent.chat_stream(session_id=req.session_id, user_input=user_input, mode=req.mode):
+            for event in agent.chat_stream(session_id=req.session_id, user_input=user_input, mode=req.mode, extra_tools=extra_tools):
                 if event.get("type") == "done":
                     event = {**event, "grounded": bool(event.get("sources"))}
                 yield f"data: {json.dumps(event)}\n\n"

@@ -72,6 +72,23 @@
         <p class="add-course-status" id="addCourseStatus"></p>
       </div>
 
+      <p class="rail-caption rail-section-heading">My Notebook &middot; private to this device</p>
+      <div class="course-list" id="notebookList">
+        <p class="loading">Loading notebook&hellip;</p>
+      </div>
+
+      <button class="add-course-btn" id="addNotebookBtn" type="button">+ Add to notebook</button>
+
+      <form class="add-course-form hidden" id="addNotebookForm">
+        <input id="notebookTitle" type="text" placeholder="Title (e.g. Midterm practice exam)" autocomplete="off" />
+        <input id="notebookFile" type="file" accept="application/pdf,.pdf" />
+        <div class="add-course-actions">
+          <button type="submit">Upload PDF</button>
+          <button type="button" id="cancelAddNotebook">Cancel</button>
+        </div>
+        <p class="add-course-status" id="addNotebookStatus"></p>
+      </form>
+
       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
     </aside>
 

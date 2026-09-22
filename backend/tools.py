@@ -18,6 +18,13 @@ v1.1 additions:
     that pulls a course's topics (and, given an exam date, the day count)
     straight from its indexed syllabus instead of requiring them to be
     retyped by hand.
+
+v1.2 addition:
+  - make_notebook_tool(vectorstore, device_id): unlike make_tools() below,
+    built fresh per request (see backend/main.py) once the caller's
+    device_id is known, so the resulting search_notebook tool is hard-
+    scoped to that one device's private uploads via closure -- never a
+    model-settable argument.
 """
 import re
 from datetime import date, datetime
@@ -383,3 +390,42 @@ def make_tools(vectorstore):
         generate_study_schedule,
         build_ai_study_plan,
     ]
+
+
+def make_notebook_tool(vectorstore, device_id: str):
+    """Builds a search_notebook tool scoped to exactly one device's private
+    PDFs. Unlike make_tools() above (called once at startup, shared across
+    every session), this is built fresh per chat turn in main.py, once the
+    request's device_id is known -- and device_id is captured here via
+    closure, not exposed as a tool argument the model could set itself. A
+    tool's argument schema is something the model controls; a Python
+    closure over a request-scoped value is not, so there is no way for a
+    model call -- confused, or steered by adversarial content in a
+    retrieved document -- to search a different device's notebook than the
+    one that actually made this request.
+    """
+
+    @tool
+    def search_notebook(query: str) -> str:
+        """Searches the student's own private notebook -- PDFs only they
+        have personally uploaded, kept separate from the shared course
+        syllabi search_syllabus covers. Use this when they reference "my
+        notes", "the PDF I uploaded", "my practice exam", "my document", or
+        similar. If search_syllabus came back NOT_FOUND for the same topic,
+        try this too before telling the student you don't see it anywhere --
+        it may be covered in their own notebook instead.
+
+        Args:
+            query: What to look up in the student's own uploaded PDFs.
+        """
+        search_filter = {"device_id": device_id, "notebook": True}
+        try:
+            docs = vectorstore.similarity_search(query, k=3, filter=search_filter, fetch_k=40)
+        except Exception as e:
+            return f"Notebook search error: {e}"
+
+        if not docs:
+            return "NOT_FOUND: No matching content was retrieved from this device's notebook."
+        return format_docs(docs)
+
+    return search_notebook

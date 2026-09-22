@@ -7,6 +7,11 @@ v1.1: added ChatRequest.mode (ELI5 / Exam / Teach-me modes), SourceChunk.page
 (page-aware citations for PDF-sourced material), ChatResponse.mode (echoes
 back which mode actually applied), and CourseInfo.source/page_count so the
 frontend can show a course as PDF- vs text-sourced.
+
+v1.2: added ChatRequest.device_id (identifies which device's private
+notebook, if any, this turn's search_notebook tool should be scoped to --
+see backend/notebook_store.py and backend/tools.py's make_notebook_tool)
+and NotebookDocInfo, the /notebook equivalent of CourseInfo.
 """
 from pydantic import BaseModel
 
@@ -16,6 +21,7 @@ class ChatRequest(BaseModel):
     message: str
     course_code: str | None = None
     mode: str | None = None  # None/"normal", "eli5", "exam", "teach"
+    device_id: str | None = None
 
 
 class SourceChunk(BaseModel):
@@ -45,6 +51,12 @@ class AddCourseRequest(BaseModel):
     course_code: str
     course_name: str
     content: str
+
+
+class NotebookDocInfo(BaseModel):
+    doc_id: str
+    title: str
+    page_count: int
 
 
 class ResetResponse(BaseModel):
