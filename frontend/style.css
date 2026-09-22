@@ -234,6 +234,30 @@ body.rail-collapsed .deck-header {
   background: #33221C;
 }
 
+.course-chip-solutions {
+  flex: 0 0 auto;
+  border: none;
+  border-left: 1px solid #302C22;
+  background: transparent;
+  color: #8C8170;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", monospace;
+  white-space: nowrap;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.course-chip-solutions:hover {
+  color: #F7F4EC;
+  background: #1E1B14;
+}
+.course-chip-solutions.attached {
+  color: #A68A5B;
+}
+.course-chip-solutions:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .add-course-btn {
   background: transparent;
   border: 1px dashed #302C22;

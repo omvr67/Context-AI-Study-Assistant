@@ -17,6 +17,16 @@ request-scoped search_notebook tool for that one call (see
 backend/tools.py's make_notebook_tool) so the agent can search a device's
 own notebook without ever being able to search anyone else's.
 
+Solutions addition: POST /courses/{course_code}/solutions and
+POST /notebook/{doc_id}/solutions attach an answer-key PDF to an existing
+course or notebook doc. Indexed under the same course_code/doc_id as the
+source material (so the existing search_syllabus/search_notebook calls
+retrieve both together) but tagged material="solutions" so citations --
+and the agent's reasoning -- can tell them apart (see rag.format_docs).
+course_solutions_chunk_ids / notebook_solutions_chunk_ids track these
+chunks separately from each course's/doc's own, so a re-upload can replace
+just the solutions instead of duplicating them.
+
 Rate-limiting addition: both /chat and /chat/stream are throttled per
 visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
 IP) before the agent is ever called, and every Groq call inside the
@@ -31,7 +41,14 @@ from fastapi.responses import StreamingResponse
 from langchain_groq import ChatGroq
 
 from .agent import SyllabusAssistantAgent
-from .custom_courses import add_custom_course, add_pdf_course, load_custom_courses, remove_custom_course
+from .custom_courses import (
+    add_course_solutions,
+    add_custom_course,
+    add_pdf_course,
+    get_custom_course,
+    load_custom_courses,
+    remove_custom_course,
+)
 from .data import SYLLABUS_DOCUMENTS
 from .models import (
     AddCourseRequest,
@@ -42,11 +59,19 @@ from .models import (
     ResetResponse,
     SourceChunk,
 )
-from .notebook_store import add_notebook_doc, load_all_notebook_docs, load_notebook_docs, remove_notebook_doc
+from .notebook_store import (
+    add_doc_solutions,
+    add_notebook_doc,
+    load_all_notebook_docs,
+    load_notebook_docs,
+    remove_notebook_doc,
+)
 from .pdf_ingest import PDFValidationError, extract_pdf_pages
 from .rag import (
+    add_course_solutions_to_vectorstore,
     add_course_to_vectorstore,
     add_notebook_doc_to_vectorstore,
+    add_notebook_solutions_to_vectorstore,
     add_pdf_course_to_vectorstore,
     build_syllabus_vectorstore,
     remove_course_from_vectorstore,
@@ -72,20 +97,31 @@ llm = ChatGroq(  # creates the LM interface
 
 # vectorstore starts loaded with the 3 hardcoded syllabi *and* anything a
 # student has already saved locally via POST /courses or /courses/upload on
-# a previous run.
-vectorstore, course_chunk_ids = build_syllabus_vectorstore()
+# a previous run. course_solutions_chunk_ids tracks any attached answer-key
+# PDFs separately from each course's own material -- see
+# rag.build_syllabus_vectorstore's docstring for why.
+vectorstore, course_chunk_ids, course_solutions_chunk_ids = build_syllabus_vectorstore()
 
 # Private per-device notebook: re-index every device's saved uploads (see
 # backend/notebook_store.py) into this same live FAISS store, tagged with
 # device_id + notebook=True so they can only ever surface through
 # search_notebook's own metadata filter -- never through search_syllabus,
 # and never for a device other than the one that uploaded them.
+# notebook_solutions_chunk_ids is the notebook-side twin of
+# course_solutions_chunk_ids above, same reason: tracked separately so a
+# re-upload can replace just the solutions chunks for one doc_id.
 notebook_chunk_ids: dict[str, list[str]] = {}  # doc_id -> chunk ids
+notebook_solutions_chunk_ids: dict[str, list[str]] = {}  # doc_id -> solutions chunk ids
 for _device_id, _docs in load_all_notebook_docs().items():
     for _doc in _docs:
         notebook_chunk_ids[_doc["doc_id"]] = add_notebook_doc_to_vectorstore(
             vectorstore, _device_id, _doc["doc_id"], _doc["title"], _doc["pages"]
         )
+        _solutions_pages = _doc.get("solutions")
+        if _solutions_pages:
+            notebook_solutions_chunk_ids[_doc["doc_id"]] = add_notebook_solutions_to_vectorstore(
+                vectorstore, _device_id, _doc["doc_id"], _doc["title"], _solutions_pages
+            )
 
 tools = make_tools(vectorstore)
 agent = SyllabusAssistantAgent(llm=llm, tools=tools)
@@ -104,8 +140,8 @@ app.add_middleware(
 
 
 def _course_registry() -> dict[str, dict]:
-    """course_code -> {course_name, custom, source, page_count} for every
-    indexed course, base + custom.
+    """course_code -> {course_name, custom, source, page_count, has_solutions}
+    for every indexed course, base + custom.
     """
     registry: dict[str, dict] = {}
     for doc in SYLLABUS_DOCUMENTS:
@@ -114,6 +150,7 @@ def _course_registry() -> dict[str, dict]:
             "custom": False,
             "source": "text",
             "page_count": None,
+            "has_solutions": False,
         }
     for course in load_custom_courses():
         pages = course.get("pages")
@@ -122,6 +159,7 @@ def _course_registry() -> dict[str, dict]:
             "custom": True,
             "source": course.get("source", "text"),
             "page_count": len(pages) if pages else None,
+            "has_solutions": bool(course.get("solutions")),
         }
     return registry
 
@@ -156,6 +194,8 @@ def health_check():
         "service": "syllabus-exam-assistant",
         "courses_indexed": len(course_chunk_ids),
         "notebook_docs_indexed": len(notebook_chunk_ids),
+        "courses_with_solutions": len(course_solutions_chunk_ids),
+        "notebook_docs_with_solutions": len(notebook_solutions_chunk_ids),
     }
 
 
@@ -169,6 +209,7 @@ def list_courses():
             custom=info["custom"],
             source=info["source"],
             page_count=info["page_count"],
+            has_solutions=info["has_solutions"],
         )
         for code, info in registry.items()
     ]
@@ -257,13 +298,69 @@ def delete_course(course_code: str):
         raise HTTPException(status_code=403, detail="Built-in courses can't be deleted")
 
     ids = course_chunk_ids.pop(code, None)
+    solutions_ids = course_solutions_chunk_ids.pop(code, None)
     removed_from_disk = remove_custom_course(code)
-    if ids is None and not removed_from_disk:
+    if ids is None and solutions_ids is None and not removed_from_disk:
         raise HTTPException(status_code=404, detail=f"No custom course '{code}' found")
 
     if ids:
         remove_course_from_vectorstore(vectorstore, ids)
+    if solutions_ids:
+        remove_course_from_vectorstore(vectorstore, solutions_ids)
     return {"status": "deleted", "course_code": code}
+
+
+@app.post("/courses/{course_code}/solutions", response_model=CourseInfo, status_code=201)
+async def upload_course_solutions(course_code: str, file: UploadFile = File(...)):
+    """Attaches a solutions/answer-key PDF to an existing custom course.
+    Indexed under the same course_code as the course's own material, but
+    tagged material="solutions" so search_syllabus's citations -- and the
+    agent's own reasoning -- can tell the two apart even though a search
+    retrieves them together (see rag.format_docs and
+    GUARDRAIL_SYSTEM_PROMPT's rule 3). Re-uploading replaces any
+    previously-attached solutions rather than stacking duplicates: any
+    chunks already tracked under this course_code in
+    course_solutions_chunk_ids are removed first.
+
+    Only works on a *custom* (already-added) course -- there's nothing
+    meaningful to attach an answer key to on a built-in course's plain
+    grading-policy syllabus.
+    """
+    code = course_code.strip().upper()
+    if code in BASE_COURSE_CODES:
+        raise HTTPException(
+            status_code=409, detail=f"'{code}' is a built-in course and can't take an attached solutions PDF"
+        )
+    existing = get_custom_course(code)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"No custom course '{code}' found -- add the course itself first")
+
+    filename = (file.filename or "").lower()
+    if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+
+    data = await file.read()
+    try:
+        pages = extract_pdf_pages(data)
+    except PDFValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if code in course_solutions_chunk_ids:
+        remove_course_from_vectorstore(vectorstore, course_solutions_chunk_ids.pop(code, []))
+
+    new_ids = add_course_solutions_to_vectorstore(vectorstore, code, existing["course_name"], pages)
+    course_solutions_chunk_ids[code] = new_ids
+    add_course_solutions(code, pages)
+
+    info = _course_registry()[code]
+    return CourseInfo(
+        course_code=code,
+        course_name=info["course_name"],
+        custom=True,
+        source=info["source"],
+        page_count=info["page_count"],
+        has_solutions=True,
+    )
 
 
 # --- Private per-device notebook -------------------------------------------
@@ -277,7 +374,12 @@ def delete_course(course_code: str):
 def list_notebook(device_id: str = Query(...)):
     device_id = _require_device_id(device_id)
     return [
-        NotebookDocInfo(doc_id=d["doc_id"], title=d["title"], page_count=d.get("page_count", len(d.get("pages", []))))
+        NotebookDocInfo(
+            doc_id=d["doc_id"],
+            title=d["title"],
+            page_count=d.get("page_count", len(d.get("pages", []))),
+            has_solutions=bool(d.get("solutions")),
+        )
         for d in load_notebook_docs(device_id)
     ]
 
@@ -331,9 +433,54 @@ def delete_notebook_doc(doc_id: str, device_id: str = Query(...)):
 
     remove_notebook_doc(device_id, doc_id)
     ids = notebook_chunk_ids.pop(doc_id, None)
+    solutions_ids = notebook_solutions_chunk_ids.pop(doc_id, None)
     if ids:
         remove_course_from_vectorstore(vectorstore, ids)
+    if solutions_ids:
+        remove_course_from_vectorstore(vectorstore, solutions_ids)
     return {"status": "deleted", "doc_id": doc_id}
+
+
+@app.post("/notebook/{doc_id}/solutions", response_model=NotebookDocInfo, status_code=201)
+async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), file: UploadFile = File(...)):
+    """Notebook equivalent of POST /courses/{course_code}/solutions: attaches
+    a solutions/answer-key PDF to one of the caller's own notebook docs.
+    Ownership is checked the same way delete_notebook_doc checks it -- a
+    doc_id belonging to a different device_id is treated as not found, so
+    this can never confirm or attach anything to another device's upload.
+    Re-uploading replaces any previously-attached solutions for this doc_id
+    rather than stacking duplicates.
+    """
+    device_id = _require_device_id(device_id)
+
+    owned = {d["doc_id"]: d for d in load_notebook_docs(device_id)}
+    existing = owned.get(doc_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"No notebook document '{doc_id}' found")
+
+    filename = (file.filename or "").lower()
+    if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+
+    data = await file.read()
+    try:
+        pages = extract_pdf_pages(data)
+    except PDFValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if doc_id in notebook_solutions_chunk_ids:
+        remove_course_from_vectorstore(vectorstore, notebook_solutions_chunk_ids.pop(doc_id, []))
+
+    new_ids = add_notebook_solutions_to_vectorstore(vectorstore, device_id, doc_id, existing["title"], pages)
+    notebook_solutions_chunk_ids[doc_id] = new_ids
+    add_doc_solutions(device_id, doc_id, pages)
+
+    return NotebookDocInfo(
+        doc_id=doc_id,
+        title=existing["title"],
+        page_count=existing.get("page_count", len(existing.get("pages", []))),
+        has_solutions=True,
+    )
 
 
 def _prefixed_input(req: ChatRequest) -> str:

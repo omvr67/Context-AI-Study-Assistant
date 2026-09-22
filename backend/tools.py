@@ -137,10 +137,13 @@ def make_tools(vectorstore):
     def search_syllabus(query: str, course_code: str = "") -> str:
         """Searches the indexed course syllabi and any uploaded PDF material
         for grading policy, exam dates, attendance rules, or lecture topics.
-        Results below a minimum relevance threshold are dropped rather than
-        returned as if they were a real match, and each result is tagged
-        with its course code (and page number, for PDF-sourced material) so
-        an answer can point back to exactly where it came from.
+        If a course has an attached answer-key PDF, its content is searched
+        too and cited as "<code> Solutions" rather than plain "<code>" --
+        see GUARDRAIL_SYSTEM_PROMPT for how to use it. Results below a
+        minimum relevance threshold are dropped rather than returned as if
+        they were a real match, and each result is tagged with its course
+        code (and page number, for PDF-sourced material) so an answer can
+        point back to exactly where it came from.
 
         Args:
             query: What to look up, e.g. "final exam date" or "attendance policy".
@@ -409,11 +412,14 @@ def make_notebook_tool(vectorstore, device_id: str):
     def search_notebook(query: str) -> str:
         """Searches the student's own private notebook -- PDFs only they
         have personally uploaded, kept separate from the shared course
-        syllabi search_syllabus covers. Use this when they reference "my
-        notes", "the PDF I uploaded", "my practice exam", "my document", or
-        similar. If search_syllabus came back NOT_FOUND for the same topic,
-        try this too before telling the student you don't see it anywhere --
-        it may be covered in their own notebook instead.
+        syllabi search_syllabus covers. If a notebook doc has an attached
+        answer-key PDF, its content is searched too and cited as
+        "<title> Solutions" -- see GUARDRAIL_SYSTEM_PROMPT for how to use
+        it. Use this tool when they reference "my notes", "the PDF I
+        uploaded", "my practice exam", "my document", or similar. If
+        search_syllabus came back NOT_FOUND for the same topic, try this
+        too before telling the student you don't see it anywhere -- it may
+        be covered in their own notebook instead.
 
         Args:
             query: What to look up in the student's own uploaded PDFs.

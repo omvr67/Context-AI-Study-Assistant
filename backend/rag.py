@@ -34,6 +34,16 @@ v1.2 addition:
     so it can only ever surface through search_notebook's own metadata
     filter (see backend/tools.py and backend/notebook_store.py) -- never
     through search_syllabus, and never for a different device.
+
+Solutions addition:
+  - add_course_solutions_to_vectorstore() / add_notebook_solutions_to_vectorstore():
+    index an attached answer-key PDF under the same course_code/doc_id as
+    its source material (so it's retrieved together, by the same existing
+    search_syllabus/search_notebook calls), tagged material="solutions" so
+    format_docs can mark it distinctly in citations. build_syllabus_vectorstore
+    now returns a third dict, course_solutions_chunk_ids, tracking these
+    chunks separately from a course's own so one can be replaced without
+    touching the other.
 """
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -71,11 +81,16 @@ def _custom_course_documents(course: dict) -> list[Document]:
     """Builds the Document(s) for one saved custom course. PDF-sourced
     courses get one Document per page (so page metadata survives into every
     chunk split from it); older/pasted-text courses get a single Document,
-    same as before.
+    same as before. If an answer-key PDF has been attached (course["solutions"]),
+    its pages are appended too, tagged material="solutions" so
+    build_syllabus_vectorstore can route their chunk ids into a separate
+    tracking dict (course_solutions_chunk_ids) from the course's own
+    material -- see that function's docstring for why that separation
+    matters.
     """
     pages = course.get("pages")
     if pages:
-        return [
+        docs = [
             Document(
                 page_content=p["text"],
                 metadata={
@@ -88,29 +103,55 @@ def _custom_course_documents(course: dict) -> list[Document]:
             )
             for p in pages
         ]
-    return [Document(
-        page_content=course["content"],
-        metadata={
-            "course_code": course["course_code"],
-            "course_name": course["course_name"],
-            "custom": True,
-            "source": course.get("source", "text"),
-        },
-    )]
+    else:
+        docs = [Document(
+            page_content=course["content"],
+            metadata={
+                "course_code": course["course_code"],
+                "course_name": course["course_name"],
+                "custom": True,
+                "source": course.get("source", "text"),
+            },
+        )]
+
+    solutions_pages = course.get("solutions")
+    if solutions_pages:
+        docs.extend(
+            Document(
+                page_content=p["text"],
+                metadata={
+                    "course_code": course["course_code"],
+                    "course_name": course["course_name"],
+                    "custom": True,
+                    "material": "solutions",
+                    "page": p["page"],
+                },
+            )
+            for p in solutions_pages
+        )
+    return docs
 
 
-def build_syllabus_vectorstore() -> tuple[FAISS, dict[str, list[str]]]:
+def build_syllabus_vectorstore() -> tuple[FAISS, dict[str, list[str]], dict[str, list[str]]]:
     """Builds the FAISS store from the hardcoded syllabi plus any locally
-    saved custom syllabi (see custom_courses.py).
+    saved custom syllabi (see custom_courses.py), including any attached
+    solutions PDFs.
 
-    Returns (vectorstore, course_chunk_ids) where course_chunk_ids maps
-    each course_code to the FAISS ids of its chunks, so a single course
-    can later be removed with vectorstore.delete(ids) instead of a full
+    Returns (vectorstore, course_chunk_ids, course_solutions_chunk_ids):
+    course_chunk_ids maps each course_code to the FAISS ids of its own
+    chunks, and course_solutions_chunk_ids maps it to the ids of any
+    attached answer-key chunks -- kept in a *separate* dict (routed there
+    automatically inside _index, based on each chunk's material metadata)
+    so a solutions PDF can later be replaced with vectorstore.delete() on
+    just its own ids, without touching -- or needing to re-embed -- the
+    course's actual material. Either can be removed with
+    remove_course_from_vectorstore(vectorstore, ids) instead of a full
     rebuild.
     """
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     splitter = _splitter()
     course_chunk_ids: dict[str, list[str]] = {}
+    course_solutions_chunk_ids: dict[str, list[str]] = {}
     vectorstore: FAISS | None = None
 
     def _index(documents: list[Document]) -> None:
@@ -127,7 +168,8 @@ def build_syllabus_vectorstore() -> tuple[FAISS, dict[str, list[str]]]:
             new_ids = vectorstore.add_documents(chunks)
         for chunk, chunk_id in zip(chunks, new_ids):
             code = chunk.metadata.get("course_code", "UNKNOWN")
-            course_chunk_ids.setdefault(code, []).append(chunk_id)
+            target = course_solutions_chunk_ids if chunk.metadata.get("material") == "solutions" else course_chunk_ids
+            target.setdefault(code, []).append(chunk_id)
 
     _index(SYLLABUS_DOCUMENTS)
     for course in load_custom_courses():
@@ -141,7 +183,7 @@ def build_syllabus_vectorstore() -> tuple[FAISS, dict[str, list[str]]]:
             embeddings,
         )
 
-    return vectorstore, course_chunk_ids
+    return vectorstore, course_chunk_ids, course_solutions_chunk_ids
 
 
 def add_course_to_vectorstore(vectorstore: FAISS, course_code: str, course_name: str, content: str) -> list[str]:
@@ -202,6 +244,65 @@ def add_notebook_doc_to_vectorstore(
                 "device_id": device_id,
                 "doc_id": doc_id,
                 "notebook": True,
+                "page": p["page"],
+            },
+        )
+        for p in pages
+    ]
+    chunks = _splitter().split_documents(page_docs)
+    return vectorstore.add_documents(chunks)
+
+
+def add_course_solutions_to_vectorstore(
+    vectorstore: FAISS, course_code: str, course_name: str, pages: list[dict]
+) -> list[str]:
+    """Chunks + embeds a solutions/answer-key PDF attached to an existing
+    custom course and adds it to the live index, tagged material="solutions"
+    (see format_docs) so a citation -- and the agent's own reasoning -- can
+    tell an answer key apart from the original material, even though both
+    share the same course_code and are retrieved together by
+    search_syllabus's ordinary course_code filter. Returns the new chunk
+    ids; callers should track these separately from the course's own (see
+    backend/main.py's course_solutions_chunk_ids) so a later re-upload can
+    remove just the old solutions chunks before adding a replacement.
+    """
+    page_docs = [
+        Document(
+            page_content=p["text"],
+            metadata={
+                "course_code": course_code,
+                "course_name": course_name,
+                "custom": True,
+                "material": "solutions",
+                "page": p["page"],
+            },
+        )
+        for p in pages
+    ]
+    chunks = _splitter().split_documents(page_docs)
+    return vectorstore.add_documents(chunks)
+
+
+def add_notebook_solutions_to_vectorstore(
+    vectorstore: FAISS, device_id: str, doc_id: str, title: str, pages: list[dict]
+) -> list[str]:
+    """Notebook equivalent of add_course_solutions_to_vectorstore: chunks +
+    embeds a solutions PDF attached to one of a device's own notebook docs,
+    tagged material="solutions" plus the same device_id + notebook=True +
+    doc_id metadata the source notebook doc itself carries, so
+    search_notebook's existing device_id filter covers the attached
+    solutions automatically -- no separate tool or filter change needed.
+    """
+    page_docs = [
+        Document(
+            page_content=p["text"],
+            metadata={
+                "course_code": title,
+                "course_name": title,
+                "device_id": device_id,
+                "doc_id": doc_id,
+                "notebook": True,
+                "material": "solutions",
                 "page": p["page"],
             },
         )
@@ -290,12 +391,21 @@ def format_docs(docs) -> str:
     course code and, for PDF-sourced chunks, page number (e.g.
     "[CS301|p.4] ..."). agent.py's _parse_sources knows this exact format
     and splits the "|p.N" suffix back out for the API response.
+
+    A chunk from an attached answer-key PDF (material="solutions") gets
+    " Solutions" appended to its display code (e.g. "[CS301 Solutions|p.2]
+    ...") so it reads as distinct from the original material in both the
+    agent's own context and the citations shown to the student, even
+    though both share the same underlying course_code/doc_id and are
+    retrieved together.
     """
     if not docs:
         return ""
     blocks = []
     for d in docs:
         code = d.metadata.get("course_code", "UNKNOWN")
+        if d.metadata.get("material") == "solutions":
+            code = f"{code} Solutions"
         page = d.metadata.get("page")
         tag = f"{code}|p.{page}" if page else code
         blocks.append(f"[{tag}] {d.page_content}")

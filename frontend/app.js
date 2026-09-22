@@ -229,6 +229,56 @@ const MODE_LABELS = {
   teach: "🎓 Teach Me",
 };
 
+// --- Solutions PDF attach: shared helper used by both course chips and
+// notebook chips (see backend's POST /courses/{code}/solutions and
+// POST /notebook/{doc_id}/solutions). A small button opens a native file
+// picker and uploads the chosen PDF immediately -- no separate form UI,
+// consistent with how compact the rest of a chip row already is.
+function addSolutionsButton(chip, { hasSolutions, label, uploadFn, onDone }) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "course-chip-solutions" + (hasSolutions ? " attached" : "");
+  btn.title = hasSolutions ? `Replace the solutions PDF for ${label}` : `Attach a solutions PDF for ${label}`;
+  btn.textContent = hasSolutions ? "✓ Solutions" : "🔑 Add solutions";
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "application/pdf,.pdf";
+  fileInput.className = "hidden";
+
+  const resetLabel = () => {
+    btn.disabled = false;
+    btn.textContent = hasSolutions ? "✓ Solutions" : "🔑 Add solutions";
+  };
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    fileInput.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      alert("Please choose a .pdf file.");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Uploading…";
+    try {
+      await uploadFn(file);
+      onDone();
+    } catch (err) {
+      alert(err.message || "Couldn't upload that solutions PDF — is the backend running?");
+      resetLabel();
+    }
+  });
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  chip.appendChild(btn);
+  chip.appendChild(fileInput);
+}
+
 function renderChip(course, isAll) {
   const chip = document.createElement("div");
   chip.className = "course-chip" + (isAll ? " active" : "");
@@ -249,6 +299,24 @@ function renderChip(course, isAll) {
   chip.appendChild(main);
 
   if (course.custom) {
+    addSolutionsButton(chip, {
+      hasSolutions: course.has_solutions,
+      label: course.course_code,
+      uploadFn: async (file) => {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch(`${API_BASE}/courses/${encodeURIComponent(course.course_code)}/solutions`, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `status ${res.status}`);
+        }
+      },
+      onDone: loadCourses,
+    });
+
     const del = document.createElement("button");
     del.type = "button";
     del.className = "course-chip-delete";
@@ -308,6 +376,25 @@ function renderNotebookChip(doc) {
   main.className = "course-chip-main";
   main.innerHTML = `<span class="code">📓 ${doc.page_count} page${doc.page_count === 1 ? "" : "s"}</span><span class="name">${doc.title}</span>`;
   chip.appendChild(main);
+
+  addSolutionsButton(chip, {
+    hasSolutions: doc.has_solutions,
+    label: doc.title,
+    uploadFn: async (file) => {
+      const formData = new FormData();
+      formData.append("device_id", deviceId);
+      formData.append("file", file);
+      const res = await fetch(`${API_BASE}/notebook/${encodeURIComponent(doc.doc_id)}/solutions`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `status ${res.status}`);
+      }
+    },
+    onDone: loadNotebook,
+  });
 
   const del = document.createElement("button");
   del.type = "button";

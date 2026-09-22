@@ -12,6 +12,10 @@ v1.2: added ChatRequest.device_id (identifies which device's private
 notebook, if any, this turn's search_notebook tool should be scoped to --
 see backend/notebook_store.py and backend/tools.py's make_notebook_tool)
 and NotebookDocInfo, the /notebook equivalent of CourseInfo.
+
+Solutions addition: CourseInfo.has_solutions / NotebookDocInfo.has_solutions
+report whether an answer-key PDF has been attached via
+POST /courses/{course_code}/solutions or POST /notebook/{doc_id}/solutions.
 """
 from pydantic import BaseModel
 
@@ -45,6 +49,7 @@ class CourseInfo(BaseModel):
     custom: bool = False
     source: str = "text"
     page_count: int | None = None
+    has_solutions: bool = False
 
 
 class AddCourseRequest(BaseModel):
@@ -57,6 +62,7 @@ class NotebookDocInfo(BaseModel):
     doc_id: str
     title: str
     page_count: int
+    has_solutions: bool = False
 
 
 class ResetResponse(BaseModel):

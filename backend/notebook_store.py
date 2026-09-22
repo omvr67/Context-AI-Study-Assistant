@@ -11,6 +11,11 @@ so search_notebook can cite "p.N" the same way search_syllabus already
 does for uploaded course PDFs.
 
 Storage shape: { "<device_id>": [ {doc_id, title, pages, page_count}, ... ] }
+
+Solutions addition: a doc record may also carry a "solutions" key -- the
+same {"page": int, "text": str} page list shape, from a separate
+answer-key PDF attached via POST /notebook/{doc_id}/solutions (see main.py
+and rag.add_notebook_solutions_to_vectorstore).
 """
 import json
 import uuid
@@ -82,3 +87,21 @@ def remove_notebook_doc(device_id: str, doc_id: str) -> bool:
     data[device_id] = remaining
     _save_all(data)
     return True
+
+
+def add_doc_solutions(device_id: str, doc_id: str, pages: list[dict]) -> dict | None:
+    """Attaches (or replaces) a solutions/answer-key PDF's pages on one of
+    this device's existing notebook docs. Returns the updated record, or
+    None if doc_id doesn't exist under this device_id -- checked the same
+    ownership-first way remove_notebook_doc is, so one device can't attach
+    solutions to (or even confirm the existence of) another device's
+    notebook doc.
+    """
+    data = _load_all()
+    docs = data.get(device_id, [])
+    for d in docs:
+        if d["doc_id"] == doc_id:
+            d["solutions"] = pages
+            _save_all(data)
+            return d
+    return None
