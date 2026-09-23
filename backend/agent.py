@@ -38,11 +38,21 @@ Rate-limiting addition:
     _stream_with_backoff, which retries with exponential backoff on a
     429 and otherwise fails immediately. See backend/rate_limit.py for
     the separate per-visitor request throttle enforced in main.py.
+
+Flashcards addition:
+  - generate_flashcards(): a one-shot, session-less structured-output call
+    (Groq's strict JSON-schema mode) that turns a course's or notebook
+    doc's material into a fixed-shape list of flashcards. Triggered by a
+    "/flashcards" command typed into the composer (frontend/app.js), which
+    never reaches this class's chat()/chat_stream() at all -- it's a
+    separate endpoint (POST /flashcards) with no tool-calling loop.
 """
 import re
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+from .models import GeneratedFlashcards
 
 GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant -- a sharp, encouraging
 study partner for enrolled students, not a generic chatbot. Be confident, concise, and specific;
@@ -311,6 +321,46 @@ class SyllabusAssistantAgent:
             return summary_msg.content.strip() or None
         except Exception:
             return None
+
+    def generate_flashcards(self, source_text: str, title: str, count: int = 10) -> list[dict]:
+        """Generates `count` question/answer flashcards from a course's or
+        notebook doc's material. source_text may already have an attached
+        solutions PDF's text folded into it (see backend/main.py's
+        /flashcards endpoint, which assembles source + solutions before
+        calling this) -- the prompt below is written to prefer turning real
+        Q&A pairs into cards when that's present, over inventing new ones.
+
+        Uses Groq's strict JSON-schema structured-output mode via
+        with_structured_output(method="json_schema", strict=True) --
+        supported specifically for openai/gpt-oss-120b (see
+        ChatGroq.with_structured_output's docstring) -- so the result is
+        guaranteed to match GeneratedFlashcards' shape via constrained
+        decoding. No manual JSON parsing or malformed-output retry logic
+        needed, unlike a plain-text "please output JSON" prompt would need.
+
+        Uses self.llm directly (not the tool-bound version), same as
+        summarize(), since this is a one-shot generation task with no tool
+        calls involved -- and takes no session_id, since a flashcard deck
+        isn't part of any chat history.
+
+        Raises on failure (rate limit or otherwise) rather than catching it,
+        same as a plain self.llm.invoke() call would -- callers should
+        catch and translate, the same way main.py's /flashcards endpoint
+        does for FRIENDLY_QUOTA_MESSAGE.
+        """
+        prompt = (
+            f'Create exactly {count} study flashcards from the material below, titled "{title}".\n\n'
+            "Prefer turning existing question/answer pairs into cards (e.g. practice exam questions "
+            "paired with an attached answer key, marked below as \"--- Answer key ---\") over inventing "
+            "new ones, when the material has them. Otherwise, write flashcards that test the material's "
+            "key facts, definitions, dates, or policy points -- one clear question per card, with a "
+            "concise, correct answer. Spread the cards across the material rather than clustering on a "
+            "single section.\n\n"
+            f"MATERIAL:\n{source_text}"
+        )
+        structured_llm = self.llm.with_structured_output(GeneratedFlashcards, method="json_schema", strict=True)
+        result: GeneratedFlashcards = _invoke_with_backoff(structured_llm.invoke, [HumanMessage(content=prompt)])
+        return [c.model_dump() for c in result.cards][:count]
 
     def chat(self, session_id: str, user_input: str, mode: str | None = None, extra_tools=None) -> dict:
         """Runs one turn of the ReAct loop.

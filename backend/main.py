@@ -5,7 +5,8 @@ Endpoint shapes follow the Demystifying APIs notebook conventions:
 Pydantic request/response models, HTTPException for error cases, and a
 plain FastAPI() app instance. Run from the project root with:
 
- To actiate -->  uvicorn backend.main:app --reload --port 8000
+ To actiate:
+   uvicorn backend.main:app --reload --port 8000
 
 v1.1 additions: POST /courses/upload (PDF ingestion) and POST /chat/stream
 (SSE streaming chat) -- see their docstrings below for details.
@@ -31,6 +32,14 @@ Rate-limiting addition: both /chat and /chat/stream are throttled per
 visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
 IP) before the agent is ever called, and every Groq call inside the
 agent retries with backoff on a 429 -- see backend/agent.py.
+
+Flashcards addition: POST /flashcards, a /command (typed into the
+composer, not a button -- see frontend/app.js) that generates a fixed
+10-card deck from a resolved course or notebook doc's material (plus its
+attached solutions, if any). Deliberately its own endpoint rather than a
+chat tool: it never touches ChatRequest, the agent's tool-calling loop, or
+any session history -- see agent.py's generate_flashcards for the one-shot
+structured-output call backing it.
 """
 import json
 import os
@@ -40,7 +49,7 @@ from fastapi.middleware.cors import CORSMiddleware  # connects the front and bac
 from fastapi.responses import StreamingResponse
 from langchain_groq import ChatGroq
 
-from .agent import SyllabusAssistantAgent
+from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limit_error
 from .custom_courses import (
     add_course_solutions,
     add_custom_course,
@@ -55,6 +64,9 @@ from .models import (
     ChatRequest,
     ChatResponse,
     CourseInfo,
+    Flashcard,
+    FlashcardDeck,
+    FlashcardsRequest,
     NotebookDocInfo,
     ResetResponse,
     SourceChunk,
@@ -74,6 +86,7 @@ from .rag import (
     add_notebook_solutions_to_vectorstore,
     add_pdf_course_to_vectorstore,
     build_syllabus_vectorstore,
+    get_course_full_text,
     remove_course_from_vectorstore,
 )
 from .rate_limit import check_and_increment
@@ -481,6 +494,87 @@ async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), fil
         page_count=existing.get("page_count", len(existing.get("pages", []))),
         has_solutions=True,
     )
+
+
+# --- Flashcards -------------------------------------------------------------
+# A /command, not a chat message: frontend/app.js intercepts "/flashcards
+# ..." in the composer before it would ever reach POST /chat -- so this
+# endpoint never sees ChatRequest, the agent's tool loop, or any session
+# history. It just resolves a target (course code or notebook title) to
+# some material, hands that to agent.generate_flashcards(), and returns a
+# fixed-shape deck.
+
+MAX_FLASHCARD_SOURCE_CHARS = 24_000
+
+
+def _truncate_for_flashcards(text: str) -> str:
+    """Soft safety cap so a pathologically large upload can't blow the
+    prompt budget -- generate_flashcards' one-shot call has no
+    conversation history riding along, so this is a much smaller concern
+    than it would be for chat(), but an unbounded PDF is still worth
+    guarding against.
+    """
+    if len(text) <= MAX_FLASHCARD_SOURCE_CHARS:
+        return text
+    return text[:MAX_FLASHCARD_SOURCE_CHARS] + "\n\n[...material truncated for length...]"
+
+
+@app.post("/flashcards", response_model=FlashcardDeck)
+def generate_flashcards_endpoint(req: FlashcardsRequest):
+    target = req.target.strip()
+    if not target:
+        raise HTTPException(
+            status_code=422, detail="Specify a course code or notebook title, e.g. /flashcards CS301"
+        )
+
+    code = target.upper()
+    registry = _course_registry()
+
+    if code in registry:
+        info = registry[code]
+        source_text = get_course_full_text(code) or ""
+        solutions_text = ""
+        custom = get_custom_course(code)
+        if custom and custom.get("solutions"):
+            solutions_text = "\n\n".join(p["text"] for p in custom["solutions"])
+        title = f"{code} \u2014 {info['course_name']}"
+        source_kind = "course"
+    else:
+        device_id = _require_device_id(req.device_id)
+        matches = [d for d in load_notebook_docs(device_id) if target.lower() in d["title"].lower()]
+        if len(matches) > 1:
+            names = ", ".join(f'"{m["title"]}"' for m in matches)
+            raise HTTPException(
+                status_code=422, detail=f"Multiple notebook docs match '{target}': {names} -- be more specific"
+            )
+        if not matches:
+            raise HTTPException(status_code=404, detail=f"No course or notebook document found matching '{target}'")
+        doc = matches[0]
+        source_text = "\n\n".join(p["text"] for p in doc.get("pages", []))
+        solutions_text = ""
+        if doc.get("solutions"):
+            solutions_text = "\n\n".join(p["text"] for p in doc["solutions"])
+        title = doc["title"]
+        source_kind = "notebook"
+
+    combined = source_text.strip()
+    if solutions_text:
+        combined = f"{combined}\n\n--- Answer key ---\n{solutions_text}"
+    combined = _truncate_for_flashcards(combined)
+
+    if not combined:
+        raise HTTPException(status_code=422, detail=f"'{target}' doesn't have any material indexed yet")
+
+    try:
+        cards = agent.generate_flashcards(combined, title, count=10)
+    except Exception as e:
+        detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate flashcards: {e}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    if not cards:
+        raise HTTPException(status_code=502, detail="The model didn't return any flashcards -- please try again")
+
+    return FlashcardDeck(title=title, source=source_kind, cards=[Flashcard(**c) for c in cards])
 
 
 def _prefixed_input(req: ChatRequest) -> str:

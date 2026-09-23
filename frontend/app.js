@@ -558,11 +558,121 @@ async function sendMessage(message) {
   }
 }
 
+// --- Flashcards: a /command, not a button -- see backend's POST /flashcards.
+// Typing "/flashcards" (optionally followed by a course code or notebook
+// title) is intercepted in the composer's submit handler above and never
+// reaches the normal chat loop at all; it hits its own endpoint and renders
+// its own interactive card type instead of a streamed reply.
+const FLASHCARDS_COMMAND_RE = /^\/flashcards(?:\s+(.*))?$/i;
+
+function addFlashcardDeckCard(deck) {
+  const card = document.createElement("div");
+  card.className = "card assistant flashcard-deck";
+
+  const header = document.createElement("div");
+  header.className = "flashcard-header";
+  header.innerHTML = `<span class="title">🗂️ ${deck.title}</span><span>${deck.cards.length} cards</span>`;
+  card.appendChild(header);
+
+  const face = document.createElement("div");
+  face.className = "flashcard-face";
+  face.title = "Click to flip";
+  card.appendChild(face);
+
+  const nav = document.createElement("div");
+  nav.className = "flashcard-nav";
+  const prevBtn = document.createElement("button");
+  prevBtn.type = "button";
+  prevBtn.textContent = "← Prev";
+  const counter = document.createElement("span");
+  counter.className = "counter";
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.textContent = "Next →";
+  nav.append(prevBtn, counter, nextBtn);
+  card.appendChild(nav);
+
+  const state = { index: 0, flipped: false };
+
+  function render() {
+    const c = deck.cards[state.index];
+    const label = state.flipped ? "Answer" : "Question";
+    const text = state.flipped ? c.back : c.front;
+    face.innerHTML = `<div><span class="side-label">${label}</span>${renderMarkdown(text)}</div>`;
+    counter.textContent = `${state.index + 1} / ${deck.cards.length}`;
+    prevBtn.disabled = state.index === 0;
+    nextBtn.disabled = state.index === deck.cards.length - 1;
+  }
+
+  face.addEventListener("click", () => {
+    state.flipped = !state.flipped;
+    render();
+  });
+  prevBtn.addEventListener("click", () => {
+    if (state.index === 0) return;
+    state.index -= 1;
+    state.flipped = false;
+    render();
+  });
+  nextBtn.addEventListener("click", () => {
+    if (state.index === deck.cards.length - 1) return;
+    state.index += 1;
+    state.flipped = false;
+    render();
+  });
+
+  render();
+  thread.appendChild(card);
+  thread.scrollTop = thread.scrollHeight;
+  return card;
+}
+
+async function handleFlashcardsCommand(raw) {
+  addCard("user", raw);
+  messageInput.value = "";
+  setSending(true);
+
+  const match = raw.match(FLASHCARDS_COMMAND_RE);
+  const typedTarget = (match && match[1] ? match[1] : "").trim();
+  const target = typedTarget || activeCourse || "";
+
+  if (!target) {
+    addCard("error", "Usage: /flashcards <course code or notebook title> — or select a course in the sidebar first.");
+    setSending(false);
+    messageInput.focus();
+    return;
+  }
+
+  const pending = addThinkingCard();
+  try {
+    const res = await fetch(`${API_BASE}/flashcards`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, device_id: deviceId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
+
+    pending.remove();
+    addFlashcardDeckCard(data);
+  } catch (err) {
+    pending.className = "card error";
+    pending.textContent = `Couldn't generate flashcards: ${err.message}`;
+  } finally {
+    setSending(false);
+    messageInput.focus();
+  }
+}
+
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   const value = messageInput.value.trim();
   if (!value) return;
-  sendMessage(value);
+  if (FLASHCARDS_COMMAND_RE.test(value)) {
+    handleFlashcardsCommand(value);
+  } else {
+    sendMessage(value);
+  }
 });
 
 stopBtn.addEventListener("click", () => {

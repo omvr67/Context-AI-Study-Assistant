@@ -15,6 +15,7 @@
     "Give a course code and ask for a study plan \u2014 topics and dates are pulled straight from the syllabus.",
     "Don't see your course? Add it in the sidebar \u2014 paste the text or upload a PDF.",
     "Try Exam Mode or Teach Me This Chapter from the bar above the chat for a different kind of answer.",
+    "Type /flashcards CS301 (or just /flashcards with a course selected) for a 10-card study deck.",
     "The whole conversation is remembered, so follow-ups don't need repeated context.",
     "If it's not in the syllabus, the answer says so instead of making something up.",
   ];

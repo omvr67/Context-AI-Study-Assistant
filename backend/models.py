@@ -16,6 +16,14 @@ and NotebookDocInfo, the /notebook equivalent of CourseInfo.
 Solutions addition: CourseInfo.has_solutions / NotebookDocInfo.has_solutions
 report whether an answer-key PDF has been attached via
 POST /courses/{course_code}/solutions or POST /notebook/{doc_id}/solutions.
+
+Flashcards addition: Flashcard/GeneratedFlashcards/FlashcardDeck/FlashcardsRequest
+support POST /flashcards, triggered client-side by a "/flashcards" command
+typed into the composer (see frontend/app.js) rather than a chat message --
+it never goes through ChatRequest/the agent's tool loop at all.
+GeneratedFlashcards is the schema handed to the model's structured-output
+mode (see agent.py's generate_flashcards); FlashcardDeck is what the
+endpoint actually returns, with the title/source filled in server-side.
 """
 from pydantic import BaseModel
 
@@ -69,3 +77,30 @@ class ResetResponse(BaseModel):
     status: str
     session_id: str
     summary: str | None = None
+
+
+class Flashcard(BaseModel):
+    front: str
+    back: str
+
+
+class GeneratedFlashcards(BaseModel):
+    """Schema passed to the model's structured-output mode -- see
+    agent.py's generate_flashcards(). Deliberately just the cards: the
+    title and source are already known server-side once a target resolves
+    (see main.py's /flashcards endpoint), so there's no reason to ask the
+    model to reproduce them and risk it drifting from the real values.
+    """
+    cards: list[Flashcard]
+
+
+class FlashcardDeck(BaseModel):
+    """Response shape for POST /flashcards."""
+    title: str
+    source: str  # "course" | "notebook"
+    cards: list[Flashcard]
+
+
+class FlashcardsRequest(BaseModel):
+    target: str
+    device_id: str | None = None

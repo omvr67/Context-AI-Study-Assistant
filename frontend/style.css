@@ -616,6 +616,90 @@ body.rail-collapsed .deck-header {
   color: var(--accent);
 }
 
+/* ---------- Flashcard deck (see the /flashcards command in app.js) ---------- */
+.card.flashcard-deck {
+  max-width: 420px;
+  width: 100%;
+}
+
+.flashcard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.flashcard-header .title {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.flashcard-face {
+  min-height: 110px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--paper-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  transition: background 0.15s ease;
+}
+.flashcard-face:hover {
+  background: #E3DCC6;
+}
+.flashcard-face .side-label {
+  display: block;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent-warm);
+  margin-bottom: 6px;
+}
+.flashcard-face p {
+  margin: 0;
+}
+
+.flashcard-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+}
+.flashcard-nav button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.flashcard-nav button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.flashcard-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.flashcard-nav .counter {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+@media (max-width: 720px) {
+  .card.flashcard-deck {
+    max-width: 100%;
+  }
+}
+
 .card-meta {
   display: flex;
   flex-wrap: wrap;
