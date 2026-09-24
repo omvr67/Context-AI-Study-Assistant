@@ -24,6 +24,12 @@ it never goes through ChatRequest/the agent's tool loop at all.
 GeneratedFlashcards is the schema handed to the model's structured-output
 mode (see agent.py's generate_flashcards); FlashcardDeck is what the
 endpoint actually returns, with the title/source filled in server-side.
+
+v1.3: added the "depth" mode (Deep Explainer). Still just another
+ChatRequest.mode value -- no schema change beyond the comment below --
+but now reachable two ways from the frontend: the existing sticky
+mode-bar buttons, or a one-shot "/depth" (and, replacing the old "Exam
+Mode" button, "/exam") command typed straight into the composer.
 """
 from pydantic import BaseModel
 
@@ -32,7 +38,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     course_code: str | None = None
-    mode: str | None = None  # None/"normal", "eli5", "exam", "teach"
+    mode: str | None = None  # None/"normal", "eli5", "exam", "teach", "depth"
     device_id: str | None = None
 
 

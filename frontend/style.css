@@ -12,6 +12,8 @@
   --text-muted: #6E6858;
   --radius: 2px;
   --rail-width: 260px;
+  --command-blue: #2E5AAC;
+  --command-blue-soft: #E8EEFB;
 }
 
 * {
@@ -774,6 +776,99 @@ body.rail-collapsed .deck-header {
 .composer input:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* ---------- v1.3: slash-command highlight overlay + suggestion palette ---------
+   #messageInput's own text is made transparent (caret still visible) and
+   #composerHighlight -- an absolutely-positioned twin with identical font/
+   padding/border-box -- is drawn underneath it, mirroring the same text but
+   with a recognized leading command ("/depth", "/exam", "/flashcards")
+   wrapped in a blue span. app.js keeps the two in sync on every keystroke,
+   including scrollLeft so long lines still line up while scrolled. */
+.composer-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-input-wrap input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  line-height: 1.4;
+}
+
+.composer-input-wrap input::placeholder {
+  color: #8C8170;
+  -webkit-text-fill-color: #8C8170;
+}
+
+.composer-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+  font-family: inherit;
+  line-height: 1.4;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+/* Color only -- never weight, size, or spacing here. Changing anything that
+   affects glyph width would make this span render wider/narrower than the
+   same (invisible) text underneath it in the real input, throwing the caret
+   out of sync with what's visually on screen. Color is metric-free, so it's
+   the only safe way to distinguish the command token. */
+.composer-highlight .cmd-token {
+  color: var(--command-blue);
+}
+
+.command-suggestions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 5;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(21, 19, 15, 0.16);
+  overflow: hidden;
+}
+
+.command-suggestion-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+.command-suggestion-item .cmd {
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--command-blue);
+  white-space: nowrap;
+}
+
+.command-suggestion-item .desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.command-suggestion-item:hover,
+.command-suggestion-item.active {
+  background: var(--command-blue-soft);
 }
 
 .composer button {

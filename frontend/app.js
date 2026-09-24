@@ -31,6 +31,9 @@ const deviceId = getOrCreateDeviceId();
 
 const thread = document.getElementById("thread");
 const composer = document.getElementById("composer");
+const composerInputWrap = document.getElementById("composerInputWrap");
+const composerHighlight = document.getElementById("composerHighlight");
+const commandSuggestions = document.getElementById("commandSuggestions");
 const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 const stopBtn = document.getElementById("stopBtn");
@@ -227,6 +230,7 @@ const MODE_LABELS = {
   eli5: "🧒 ELI5",
   exam: "📝 Exam Mode",
   teach: "🎓 Teach Me",
+  depth: "🧠 Deep Explainer",
 };
 
 // --- Solutions PDF attach: shared helper used by both course chips and
@@ -439,6 +443,132 @@ async function loadNotebook() {
   }
 }
 
+// --- Slash commands: highlight overlay + "/" suggestion palette ---------
+// Three commands are recognized when typed as the leading token of the
+// composer: /depth and /exam are one-shot mode overrides for that single
+// message (handled in the submit handler below, alongside currentMode);
+// /flashcards is its own command entirely (see FLASHCARDS_COMMAND_RE further
+// down) and is only listed here so it shows up in the suggestion box too.
+const SLASH_COMMANDS = [
+  { cmd: "depth", desc: "Deep, in-depth explanation for this message" },
+  { cmd: "exam", desc: "Frame this message in exam-prep mode" },
+  { cmd: "flashcards", desc: "Generate a flashcard deck (course code or notebook title)" },
+];
+
+// A fully-typed, recognized command word at the very start of the message --
+// used both to color it blue in the overlay and, in the submit handler, to
+// decide whether this particular send carries a one-shot mode override.
+const LEADING_COMMAND_RE = /^\/(depth|exam|flashcards)\b/i;
+
+// "/" plus an in-progress word and nothing else yet -- while this matches,
+// the student is still choosing a command, so the suggestion box stays open.
+const PARTIAL_COMMAND_RE = /^\/([a-zA-Z]*)$/;
+
+let suggestionItems = [];
+let activeSuggestionIndex = -1;
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Keeps #composerHighlight showing the same text as #messageInput (whose own
+// text is transparent -- see style.css), with a recognized leading command
+// wrapped in a blue span, and its horizontal scroll position matched so long
+// lines still line up correctly while the input is scrolled.
+function renderComposerHighlight() {
+  const value = messageInput.value;
+  const match = value.match(LEADING_COMMAND_RE);
+  if (!match) {
+    composerHighlight.textContent = value;
+  } else {
+    const rest = value.slice(match[0].length);
+    composerHighlight.innerHTML = `<span class="cmd-token">${escapeHtml(match[0])}</span>${escapeHtml(rest)}`;
+  }
+  composerHighlight.scrollLeft = messageInput.scrollLeft;
+}
+
+function closeSuggestions() {
+  commandSuggestions.classList.add("hidden");
+  commandSuggestions.innerHTML = "";
+  suggestionItems = [];
+  activeSuggestionIndex = -1;
+}
+
+function renderSuggestions() {
+  commandSuggestions.innerHTML = "";
+  suggestionItems.forEach((entry, i) => {
+    const item = document.createElement("div");
+    item.className = "command-suggestion-item" + (i === activeSuggestionIndex ? " active" : "");
+    item.innerHTML = `<span class="cmd">/${entry.cmd}</span><span class="desc">${entry.desc}</span>`;
+    // mousedown (not click) fires before the input's blur handler would
+    // otherwise close the box first and swallow the selection.
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      acceptSuggestion(entry.cmd);
+    });
+    commandSuggestions.appendChild(item);
+  });
+  commandSuggestions.classList.remove("hidden");
+}
+
+function acceptSuggestion(cmd) {
+  messageInput.value = `/${cmd} `;
+  renderComposerHighlight();
+  closeSuggestions();
+  messageInput.focus();
+  const end = messageInput.value.length;
+  messageInput.setSelectionRange(end, end);
+}
+
+function updateSuggestions() {
+  const match = messageInput.value.match(PARTIAL_COMMAND_RE);
+  if (!match) {
+    closeSuggestions();
+    return;
+  }
+  const fragment = match[1].toLowerCase();
+  suggestionItems = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(fragment));
+  if (!suggestionItems.length) {
+    closeSuggestions();
+    return;
+  }
+  activeSuggestionIndex = 0;
+  renderSuggestions();
+}
+
+messageInput.addEventListener("input", () => {
+  renderComposerHighlight();
+  updateSuggestions();
+});
+
+messageInput.addEventListener("scroll", () => {
+  composerHighlight.scrollLeft = messageInput.scrollLeft;
+});
+
+messageInput.addEventListener("keydown", (e) => {
+  if (commandSuggestions.classList.contains("hidden")) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    activeSuggestionIndex = (activeSuggestionIndex + 1) % suggestionItems.length;
+    renderSuggestions();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    activeSuggestionIndex = (activeSuggestionIndex - 1 + suggestionItems.length) % suggestionItems.length;
+    renderSuggestions();
+  } else if (e.key === "Enter" || e.key === "Tab") {
+    if (activeSuggestionIndex >= 0) {
+      e.preventDefault();
+      acceptSuggestion(suggestionItems[activeSuggestionIndex].cmd);
+    }
+  } else if (e.key === "Escape") {
+    closeSuggestions();
+  }
+});
+
+messageInput.addEventListener("blur", () => {
+  setTimeout(closeSuggestions, 100);
+});
+
 // --- Sending a message, streamed ----------------------------------------
 
 function setSending(isSending) {
@@ -448,9 +578,10 @@ function setSending(isSending) {
   stopBtn.classList.toggle("hidden", !isSending);
 }
 
-async function sendMessage(message) {
+async function sendMessage(message, oneShotMode) {
   addCard("user", message);
   messageInput.value = "";
+  renderComposerHighlight();
   setSending(true);
 
   const pending = addThinkingCard();
@@ -467,7 +598,11 @@ async function sendMessage(message) {
         session_id: sessionId,
         message,
         course_code: activeCourse,
-        mode: currentMode || null,
+        // A one-shot "/depth" or "/exam" typed into this message (see the
+        // composer's submit handler) wins for this request only -- it never
+        // touches currentMode, so the very next message with no command
+        // falls straight back to whatever the mode-bar has selected.
+        mode: oneShotMode || currentMode || null,
         device_id: deviceId,
       }),
       signal: activeController.signal,
@@ -630,6 +765,7 @@ function addFlashcardDeckCard(deck) {
 async function handleFlashcardsCommand(raw) {
   addCard("user", raw);
   messageInput.value = "";
+  renderComposerHighlight();
   setSending(true);
 
   const match = raw.match(FLASHCARDS_COMMAND_RE);
@@ -664,15 +800,30 @@ async function handleFlashcardsCommand(raw) {
   }
 }
 
+// /depth and /exam are one-shot: the mode they carry only applies to this
+// single request (passed straight to sendMessage as an override that never
+// touches currentMode). Unlike an earlier version of this, the leading
+// command is NOT stripped out -- the literal text the student typed is what
+// gets shown in their chat bubble and what's sent as the message, exactly
+// like /flashcards already works. The mode prompt itself (see agent.py)
+// tells the model that a leading "/depth"/"/exam" token is just the
+// trigger, not part of the question, so nothing downstream gets confused
+// by it either.
+const CHAT_COMMAND_RE = /^\/(depth|exam)\b/i;
+
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
+  closeSuggestions();
   const value = messageInput.value.trim();
   if (!value) return;
+
   if (FLASHCARDS_COMMAND_RE.test(value)) {
     handleFlashcardsCommand(value);
-  } else {
-    sendMessage(value);
+    return;
   }
+
+  const cmdMatch = value.match(CHAT_COMMAND_RE);
+  sendMessage(value, cmdMatch ? cmdMatch[1].toLowerCase() : undefined);
 });
 
 stopBtn.addEventListener("click", () => {
@@ -886,5 +1037,6 @@ addNotebookForm.addEventListener("submit", async (e) => {
   }
 });
 
+renderComposerHighlight();
 loadCourses();
 loadNotebook();

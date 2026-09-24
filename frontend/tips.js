@@ -1,11 +1,16 @@
 /**
  * Tip strip -- a thin, ghosted line above the composer that cycles once
- * through a handful of feature tips, then collapses away and doesn't
- * come back on later visits. Not a persistent widget: just a brief
- * orientation pass for a first-time visitor.
+ * through a handful of feature tips each time the page loads, then
+ * collapses away for the rest of that visit.
  *
- * Fully self-contained and independent of app.js -- it only reads/writes
- * its own localStorage key and never touches chat state.
+ * v1.3: previously "seen" was persisted forever in localStorage, so the
+ * strip played once ever per browser and then silently never came back --
+ * which defeats its purpose now that it's the one place slash commands are
+ * advertised (the mode-bar hint text was removed). It now just replays on
+ * every fresh page load instead of remembering across visits.
+ *
+ * Fully self-contained and independent of app.js -- it only touches its
+ * own DOM nodes and never touches chat state.
  */
 (() => {
   const TIPS = [
@@ -14,7 +19,8 @@
     "Set a target GPA and ask what grades you'd need \u2014 the planner works backward from it.",
     "Give a course code and ask for a study plan \u2014 topics and dates are pulled straight from the syllabus.",
     "Don't see your course? Add it in the sidebar \u2014 paste the text or upload a PDF.",
-    "Try Exam Mode or Teach Me This Chapter from the bar above the chat for a different kind of answer.",
+    "Type \u201c/\u201d in the chatbox to see commands \u2014 /depth, /exam, /flashcards \u2014 with autocomplete.",
+    "Try Explain Like I'm 5 or Teach Me This Chapter from the bar above the chat for a different kind of answer.",
     "Type /flashcards CS301 (or just /flashcards with a course selected) for a 10-card study deck.",
     "The whole conversation is remembered, so follow-ups don't need repeated context.",
     "If it's not in the syllabus, the answer says so instead of making something up.",
@@ -22,7 +28,6 @@
 
   const ROTATE_MS = 6000;
   const SWAP_MS = 250;
-  const SEEN_KEY = "connectx_tips_seen";
 
   const strip = document.getElementById("tipStrip");
   const textEl = document.getElementById("tipStripText");
@@ -30,28 +35,11 @@
   // Decorative feature -- if the markup isn't there, bail out quietly.
   if (!strip || !textEl) return;
 
-  let alreadySeen = false;
-  try {
-    alreadySeen = localStorage.getItem(SEEN_KEY) === "1";
-  } catch (e) {
-    /* private browsing or storage disabled -- default to showing once */
-  }
-
-  if (alreadySeen) {
-    strip.classList.add("done");
-    return;
-  }
-
   let index = 0;
   textEl.textContent = TIPS[0];
 
   function finish() {
     strip.classList.add("done");
-    try {
-      localStorage.setItem(SEEN_KEY, "1");
-    } catch (e) {
-      /* ignore -- worst case it shows once more on a later visit */
-    }
   }
 
   function showNext() {

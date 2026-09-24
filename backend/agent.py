@@ -46,6 +46,20 @@ Flashcards addition:
     "/flashcards" command typed into the composer (frontend/app.js), which
     never reaches this class's chat()/chat_stream() at all -- it's a
     separate endpoint (POST /flashcards) with no tool-calling loop.
+
+Slash-commands addition (v1.3):
+  - MODE_PROMPTS gained a "depth" entry (Deep Explainer mode). Unlike the
+    eli5/exam/teach modes above -- which are still also selectable via the
+    mode-bar buttons and apply to every message until the student changes
+    them -- "depth" and "exam" are additionally reachable as one-shot,
+    per-message "/depth" / "/exam" commands typed straight into the
+    composer: frontend/app.js detects a leading "/depth" or "/exam" token,
+    strips it, and sends that single request with mode set accordingly
+    without touching the sticky mode-bar selection. The "/exam" command
+    now fully replaces the old "Exam Mode" mode-bar button, which has been
+    removed from the UI. Either way the mode still arrives here as a plain
+    mode_key string and is resolved through this same MODE_PROMPTS dict --
+    this module has no notion of "commands" at all, only mode keys.
 """
 import re
 import time
@@ -101,12 +115,17 @@ per sentence, and a concrete analogy if it helps. Do not skip steps or assume pr
 This changes HOW you explain, not WHAT you're allowed to say -- rules 1-4 above (grounding, tool
 use) still apply exactly as written; never invent facts just to keep the explanation simple.""",
 
-    "exam": """Exam Mode is ON for this turn. The student is actively revising, not casually
+    "exam": """Exam Mode is ON for this turn. The student's message may start with a literal
+"/exam" token -- that's just the trigger for this mode, not part of their actual question; read
+past it and answer what they're really asking. The student is actively revising, not casually
 chatting. Lean toward exam-relevant framing: which topics are most heavily weighted, what's likely
 to be tested, and concrete revision/practice actions. If it fits the question, offer to quiz them
 with a practice question, or ask one yourself before giving the full answer. Stay grounded in the
-syllabus per the rules above -- if asked for a practice question, base it on real topics/policies
-you retrieved, not a fabricated specific like a made-up question number or past-paper detail.""",
+syllabus per the rules above when the question is about a specific course -- if asked for a
+practice question, base it on real topics/policies you retrieved, not a fabricated specific like a
+made-up question number or past-paper detail. If the student asks a general revision or
+study-skills question with no specific course involved, just answer it directly -- don't ask for a
+course code that question doesn't need.""",
 
     "teach": """Teach Me This Chapter mode is ON. Structure your entire response as a short
 tutoring sequence, in this exact order, with clear labels:
@@ -117,6 +136,21 @@ tutoring sequence, in this exact order, with clear labels:
 4. Practice -- one practice prompt or problem the student can try on their own.
 Call search_syllabus first if you haven't already retrieved content for this topic -- teaching from
 memory instead of the actual syllabus defeats the point of this mode.""",
+
+    "depth": """Deep Explainer mode is ON for this turn only. The student's message may start with
+a literal "/depth" token -- that's just the trigger for this mode, not part of their actual
+question; read past it and answer what they're really asking. Give a substantially more thorough,
+in-depth explanation than you normally would: unpack the reasoning and mechanics behind the
+answer, add relevant context, and work through a concrete example where one would help. Use more
+of your available output length instead of staying brief -- the student is explicitly asking for
+more depth. This changes HOW MUCH you explain, not WHAT you're allowed to say: if the question is
+actually about a specific course's grading, exam dates, attendance, or topics, rules 1-4 above
+still apply exactly as written (call search_syllabus, stay grounded in what it returns). But for a
+general question -- explaining a concept, working through an idea, anything not tied to a specific
+course's syllabus content -- just answer it thoroughly and directly from your own knowledge, the
+way any knowledgeable study partner would. Don't force a general question through the syllabus
+search or decline it for not matching a course; "grounded" means "don't invent syllabus facts," it
+doesn't mean "only discuss what's in a syllabus." """,
 }
 
 _GPA_KEYWORDS = ("gpa", "grade point", "cumulative average", "what would my grade", "my grade be")

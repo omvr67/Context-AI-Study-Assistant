@@ -102,7 +102,6 @@
       <div class="mode-bar" id="modeBar">
         <button type="button" class="mode-btn active" data-mode="">Normal</button>
         <button type="button" class="mode-btn" data-mode="eli5">Explain Like I'm 5</button>
-        <button type="button" class="mode-btn" data-mode="exam">Exam Mode</button>
         <button type="button" class="mode-btn" data-mode="teach">Teach Me This Chapter</button>
       </div>
 
@@ -122,12 +121,16 @@
       </div>
 
       <form class="composer" id="composer">
-        <input
-          id="messageInput"
-          type="text"
-          placeholder="Ask about a policy, your GPA, or a study plan…"
-          autocomplete="off"
-        />
+        <div class="composer-input-wrap" id="composerInputWrap">
+          <div class="command-suggestions hidden" id="commandSuggestions"></div>
+          <div class="composer-highlight" id="composerHighlight" aria-hidden="true"></div>
+          <input
+            id="messageInput"
+            type="text"
+            placeholder="Ask about a policy, your GPA, or a study plan…"
+            autocomplete="off"
+          />
+        </div>
         <button type="submit" id="sendBtn">Send</button>
         <button type="button" id="stopBtn" class="hidden">Stop</button>
       </form>
