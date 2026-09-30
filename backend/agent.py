@@ -39,34 +39,73 @@ Rate-limiting addition:
     429 and otherwise fails immediately. See backend/rate_limit.py for
     the separate per-visitor request throttle enforced in main.py.
 
-Flashcards addition:
-  - generate_flashcards(): a one-shot, session-less structured-output call
-    (Groq's strict JSON-schema mode) that turns a course's or notebook
-    doc's material into a fixed-shape list of flashcards. Triggered by a
-    "/flashcards" command typed into the composer (frontend/app.js), which
-    never reaches this class's chat()/chat_stream() at all -- it's a
-    separate endpoint (POST /flashcards) with no tool-calling loop.
+Flashcards addition, reworked in v1.3 round 2:
+  - generate_flashcards_from_conversation(): a one-shot, session-less
+    structured-output call that reads a chat session's recent transcript
+    (via recent_transcript(), also used by summarize()), has the model
+    infer the topic actually being discussed, and writes flashcards
+    testing that topic using the model's own general knowledge -- not
+    just facts literally typed out in the conversation. Triggered by a
+    bare "/flashcards" command typed into the composer (frontend/app.js),
+    which never reaches this class's chat()/chat_stream() at all -- it's a
+    separate endpoint (POST /flashcards) with no tool-calling loop. This
+    replaced an earlier generate_flashcards() that built a deck from a
+    resolved course's/notebook doc's raw material instead -- removed
+    entirely, not kept alongside the new path.
 
-Slash-commands addition (v1.3):
-  - MODE_PROMPTS gained a "depth" entry (Deep Explainer mode). Unlike the
-    eli5/exam/teach modes above -- which are still also selectable via the
-    mode-bar buttons and apply to every message until the student changes
-    them -- "depth" and "exam" are additionally reachable as one-shot,
-    per-message "/depth" / "/exam" commands typed straight into the
-    composer: frontend/app.js detects a leading "/depth" or "/exam" token,
-    strips it, and sends that single request with mode set accordingly
-    without touching the sticky mode-bar selection. The "/exam" command
-    now fully replaces the old "Exam Mode" mode-bar button, which has been
-    removed from the UI. Either way the mode still arrives here as a plain
-    mode_key string and is resolved through this same MODE_PROMPTS dict --
-    this module has no notion of "commands" at all, only mode keys.
+Modes (v1.3 round 2): MODE_PROMPTS now holds only "depth" (Deep Explainer)
+and "exam" (Exam Mode) -- the older eli5/teach modes and the mode-bar UI
+they lived behind (a sticky, click-to-select bar above the composer) have
+been removed entirely, frontend and backend. Both remaining modes are
+one-shot, per-message commands only: typing a leading "/depth" or "/exam"
+in the composer (frontend/app.js) sends that single request with mode set
+accordingly, injected here as an ephemeral system message for that turn
+only via _with_ephemeral() -- never persisted into session history, so
+nothing "sticks" silently to later messages. The mode still arrives here
+as a plain mode_key string resolved through MODE_PROMPTS; this module has
+no notion of "commands" at all.
+
+Notebook-restriction addition (v1.3 round 2): chat()/chat_stream() gained
+exclude_tool_names and extra_system_prompt params (alongside the existing
+extra_tools), so a call can both add a request-scoped tool AND leave a
+base tool out entirely for that same call. main.py uses this when the
+student has pinned specific notebook PDF(s) (ChatRequest.notebook_doc_ids):
+search_notebook is rebuilt scoped to just those doc_ids (extra_tools),
+search_syllabus is excluded outright (exclude_tool_names) rather than just
+asked-nicely-not-to-be-used, and extra_system_prompt carries a short note
+telling the model search_notebook is now its only grounding source. Same
+_with_ephemeral() mechanism the mode prompt already used, generalized from
+a single optional prompt (_with_mode, now removed) to a list -- so a mode
+prompt and this restriction note can both apply to one call at once.
+
+Quiz mode + retry-exam addition (v1.3 round 3): the "real multiple-choice
+quiz mode with explicit right/wrong grading" the original retry-exam
+request was deliberately deferred behind, instead of inferring correctness
+from free-form chat.
+  - generate_quiz_from_conversation(): the multiple-choice counterpart to
+    generate_flashcards_from_conversation() -- same conversation-driven,
+    session-less, structured-output shape, triggered by a bare "/quiz"
+    command. Grading itself happens client-side, immediately, against
+    each question's correct_index; this class never grades anything.
+  - record_quiz_results(): the frontend calls POST /quiz/results once a
+    quiz is finished (already graded client-side) purely so this class
+    has a record of what was actually missed -- see self._quiz_attempts
+    in __init__, a session-scoped list of graded attempts, cleared
+    alongside a session's chat history in reset().
+  - generate_retry_quiz(): triggered by a bare "/retry" command, reads
+    that session's wrong attempts and generates new questions -- some
+    retesting a missed concept from a different angle, some similar
+    reinforcement questions -- fulfilling the "an exam of those plus
+    similar questions" half of the original request. Returns None (main.py
+    turns this into a 422) when the session has no quiz history yet, or
+    hasn't missed anything so far.
 """
 import re
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from .models import GeneratedFlashcards
+from .models import GeneratedTopicFlashcards, GeneratedTopicQuiz
 
 GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant -- a sharp, encouraging
 study partner for enrolled students, not a generic chatbot. Be confident, concise, and specific;
@@ -109,12 +148,6 @@ SUMMARY_SYSTEM_PROMPT = """Summarize the conversation below in exactly 3 short l
 a dash. Focus on what the student asked and what was found or calculated. No preamble, no closing remarks."""
 
 MODE_PROMPTS: dict[str, str] = {
-    "eli5": """Explain Like I'm Stupid mode is ON for this turn only.
-Rewrite your answer for someone with zero background: short sentences, everyday words, one idea
-per sentence, and a concrete analogy if it helps. Do not skip steps or assume prior knowledge.
-This changes HOW you explain, not WHAT you're allowed to say -- rules 1-4 above (grounding, tool
-use) still apply exactly as written; never invent facts just to keep the explanation simple.""",
-
     "exam": """Exam Mode is ON for this turn. The student's message may start with a literal
 "/exam" token -- that's just the trigger for this mode, not part of their actual question; read
 past it and answer what they're really asking. The student is actively revising, not casually
@@ -126,16 +159,6 @@ practice question, base it on real topics/policies you retrieved, not a fabricat
 made-up question number or past-paper detail. If the student asks a general revision or
 study-skills question with no specific course involved, just answer it directly -- don't ask for a
 course code that question doesn't need.""",
-
-    "teach": """Teach Me This Chapter mode is ON. Structure your entire response as a short
-tutoring sequence, in this exact order, with clear labels:
-1. Explanation -- the core idea in plain terms, grounded in the retrieved syllabus content.
-2. Example -- one concrete, worked example illustrating it.
-3. Understanding check -- one short question testing whether the idea landed (don't answer it
-   yourself; wait for the student's reply next turn).
-4. Practice -- one practice prompt or problem the student can try on their own.
-Call search_syllabus first if you haven't already retrieved content for this topic -- teaching from
-memory instead of the actual syllabus defeats the point of this mode.""",
 
     "depth": """Deep Explainer mode is ON for this turn only. The student's message may start with
 a literal "/depth" token -- that's just the trigger for this mode, not part of their actual
@@ -291,62 +314,102 @@ class SyllabusAssistantAgent:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self._sessions: dict[str, list] = {}
+        # Per-session record of multiple-choice quiz questions actually
+        # answered (see record_quiz_results()/generate_retry_quiz()) --
+        # graded explicitly client-side against the correct_index the quiz
+        # was generated with, not inferred from free-form chat. Reset
+        # alongside a session's chat history (see reset()) since a retry
+        # quiz drawing on a conversation the student just cleared wouldn't
+        # make sense.
+        self._quiz_attempts: dict[str, list[dict]] = {}
 
     def _history(self, session_id: str) -> list:
         if session_id not in self._sessions:
             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
         return self._sessions[session_id]
 
-    def _tools_for_call(self, extra_tools):
+    def _tools_for_call(self, extra_tools, exclude_tool_names: set[str] | None = None):
         """Resolves the (bound-LLM, tools_map) pair to use for one call.
 
         Most turns reuse the precomputed self.llm_with_tools / self.tools_map
-        built once at construction time. When extra_tools is given (e.g. a
-        request-scoped search_notebook tool -- see backend/tools.py's
-        make_notebook_tool and its call site in backend/main.py), a fresh
-        bind is built for just this call instead, so a per-request tool
-        never leaks into another session's tool set.
+        built once at construction time. A fresh bind is built for just this
+        call instead whenever extra_tools is given (e.g. a request-scoped
+        search_notebook tool -- see backend/tools.py's make_notebook_tool
+        and its call site in backend/main.py) or exclude_tool_names is given
+        (e.g. leaving search_syllabus out entirely when the student has
+        pinned specific notebook PDFs -- see main.py's /chat and
+        /chat/stream), so neither a per-request tool nor a per-request
+        omission ever leaks into another session's tool set.
         """
-        if not extra_tools:
+        if not extra_tools and not exclude_tool_names:
             return self.llm_with_tools, self.tools_map
-        combined = list(self.tools_map.values()) + list(extra_tools)
-        return self.llm.bind_tools(combined), {**self.tools_map, **{t.name: t for t in extra_tools}}
+        base = [
+            t for t in self.tools_map.values()
+            if not exclude_tool_names or t.name not in exclude_tool_names
+        ]
+        combined = base + list(extra_tools or [])
+        return self.llm.bind_tools(combined), {t.name: t for t in combined}
 
     @staticmethod
-    def _with_mode(history: list, mode_prompt: str | None) -> list:
+    def _with_ephemeral(history: list, prompts: list[str | None]) -> list:
         """Builds the message list actually sent to the LLM for one call:
-        the persisted history, plus an ephemeral mode instruction (if any)
-        injected right after the base system prompt. The mode instruction
-        is never appended to `history` itself, so it applies only to the
-        request that asked for it -- the next turn starts back in normal
-        mode unless the caller asks for a mode again.
+        the persisted history, plus zero or more ephemeral system
+        instructions (a mode prompt, a notebook-restriction note, etc.)
+        injected right after the base system prompt. None entries in
+        prompts are dropped. These instructions are never appended to
+        `history` itself, so they apply only to the request that asked for
+        them -- the next turn starts back in normal mode unless the caller
+        asks again.
         """
-        if not mode_prompt:
+        active = [p for p in prompts if p]
+        if not active:
             return history
-        return [history[0], SystemMessage(content=mode_prompt)] + history[1:]
+        return [history[0], SystemMessage(content="\n\n".join(active))] + history[1:]
 
     def reset(self, session_id: str) -> None:
         """Clears a session's memory; the next turn starts a fresh SystemMessage."""
         self._sessions.pop(session_id, None)
+        self._quiz_attempts.pop(session_id, None)
+
+    def recent_transcript(self, session_id: str, max_chars: int = 4000) -> str:
+        """Plain "Student: .../Assistant: ..." transcript of a session's
+        history, most recent max_chars kept. Shared by summarize() (which
+        hands it to the model for a 3-line recap) and
+        generate_flashcards_from_conversation() (which hands a longer cut
+        of it to the model to identify a topic and build a deck from) --
+        unlike summarize()'s own return value, this is the raw
+        conversation itself, not an LLM-written gloss of it.
+
+        "[Likely tool: ...]" / "[Course context: ...]" prefixes that
+        _intent_hint / main.py's _prefixed_input tag onto the stored human
+        message are stripped -- they're routing hints for the model, not
+        something worth re-showing it here.
+
+        Returns "" if the session doesn't exist yet or nothing was
+        actually said.
+        """
+        history = self._sessions.get(session_id)
+        if not history or len(history) <= 1:
+            return ""
+
+        lines = []
+        for msg in history:
+            if isinstance(msg, HumanMessage) and msg.content:
+                text = re.sub(r"^(\[[^\]]+\]\s*)+", "", str(msg.content))
+                lines.append(f"Student: {text}")
+            elif isinstance(msg, AIMessage) and msg.content:
+                lines.append(f"Assistant: {msg.content}")
+        if not lines:
+            return ""
+        return "\n".join(lines)[-max_chars:]
 
     def summarize(self, session_id: str) -> str | None:
         """Generates a short recap of a session before it's reset. Returns
         None if the session doesn't exist yet or nothing was actually said.
         """
-        history = self._sessions.get(session_id)
-        if not history or len(history) <= 1:
+        transcript = self.recent_transcript(session_id)
+        if not transcript:
             return None
-
-        transcript_lines = []
-        for msg in history:
-            if isinstance(msg, HumanMessage) and msg.content:
-                transcript_lines.append(f"Student: {msg.content}")
-            elif isinstance(msg, AIMessage) and msg.content:
-                transcript_lines.append(f"Assistant: {msg.content}")
-        if not transcript_lines:
-            return None
-
-        transcript = "\n".join(transcript_lines)[-4000:]  # keep the summarizer prompt small
         try:
             summary_msg = _invoke_with_backoff(self.llm.invoke, [
                 SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
@@ -356,52 +419,207 @@ class SyllabusAssistantAgent:
         except Exception:
             return None
 
-    def generate_flashcards(self, source_text: str, title: str, count: int = 10) -> list[dict]:
-        """Generates `count` question/answer flashcards from a course's or
-        notebook doc's material. source_text may already have an attached
-        solutions PDF's text folded into it (see backend/main.py's
-        /flashcards endpoint, which assembles source + solutions before
-        calling this) -- the prompt below is written to prefer turning real
-        Q&A pairs into cards when that's present, over inventing new ones.
+    def generate_flashcards_from_conversation(self, transcript: str, count: int = 10) -> tuple[str, list[dict]]:
+        """Generates up to `count` study flashcards from what's actually
+        been discussed in a chat session (see recent_transcript()), rather
+        than from a specific course's or notebook doc's raw material. The
+        model identifies the topic itself and is explicitly permitted to
+        draw on its own general knowledge of that topic when writing
+        cards -- not just facts that happened to be typed out in the
+        conversation -- the same "grounded means don't invent facts, not
+        only discuss what's literally in front of you" permission depth
+        mode already gives (see MODE_PROMPTS["depth"]).
 
-        Uses Groq's strict JSON-schema structured-output mode via
-        with_structured_output(method="json_schema", strict=True) --
-        supported specifically for openai/gpt-oss-120b (see
-        ChatGroq.with_structured_output's docstring) -- so the result is
-        guaranteed to match GeneratedFlashcards' shape via constrained
-        decoding. No manual JSON parsing or malformed-output retry logic
-        needed, unlike a plain-text "please output JSON" prompt would need.
+        Returns (topic, cards). Unlike the old course/notebook-grounded
+        flashcards path this replaced, the caller (see main.py's
+        /flashcards endpoint) has no title to hand in ahead of time --
+        there's no resolved target here -- so the model reports the topic
+        it identified and the caller titles the deck from that. topic is
+        "" and cards is [] when the conversation doesn't have enough of an
+        actual subject to build a deck from (e.g. only greetings, or
+        GPA/scheduling chat with nothing conceptual discussed) -- the
+        caller treats that as "not enough to work with yet" rather than a
+        generation failure.
 
-        Uses self.llm directly (not the tool-bound version), same as
-        summarize(), since this is a one-shot generation task with no tool
-        calls involved -- and takes no session_id, since a flashcard deck
-        isn't part of any chat history.
-
-        Raises on failure (rate limit or otherwise) rather than catching it,
-        same as a plain self.llm.invoke() call would -- callers should
-        catch and translate, the same way main.py's /flashcards endpoint
-        does for FRIENDLY_QUOTA_MESSAGE.
+        Same structured-output mechanism (Groq's strict JSON-schema mode),
+        session-less one-shot call using self.llm directly, and
+        raise-on-failure contract as the old generate_flashcards had --
+        callers should catch and translate, same as main.py already does
+        for FRIENDLY_QUOTA_MESSAGE.
         """
         prompt = (
-            f'Create exactly {count} study flashcards from the material below, titled "{title}".\n\n'
-            "Prefer turning existing question/answer pairs into cards (e.g. practice exam questions "
-            "paired with an attached answer key, marked below as \"--- Answer key ---\") over inventing "
-            "new ones, when the material has them. Otherwise, write flashcards that test the material's "
-            "key facts, definitions, dates, or policy points -- one clear question per card, with a "
-            "concise, correct answer. Spread the cards across the material rather than clustering on a "
-            "single section.\n\n"
-            f"MATERIAL:\n{source_text}"
+            f"Create up to {count} study flashcards based on the conversation below.\n\n"
+            "First, identify the main topic or concept the conversation is actually about -- "
+            "the thing the student would benefit from being quizzed on, not just whatever was "
+            "typed most recently. Then write flashcards that test real understanding of that "
+            "topic: definitions, how something works, why it matters, worked examples -- draw "
+            "on your own general knowledge of the subject, not only facts that happened to be "
+            "typed out in the chat below. One clear question per card, with a concise, correct "
+            "answer. If the conversation doesn't have enough of a topic to build a deck from "
+            "(e.g. only greetings, or scheduling/GPA-only chat with no actual subject "
+            "discussed), set topic to an empty string and return an empty cards list instead of "
+            "forcing something unrelated.\n\n"
+            f"CONVERSATION:\n{transcript}"
         )
-        structured_llm = self.llm.with_structured_output(GeneratedFlashcards, method="json_schema", strict=True)
-        result: GeneratedFlashcards = _invoke_with_backoff(structured_llm.invoke, [HumanMessage(content=prompt)])
-        return [c.model_dump() for c in result.cards][:count]
+        structured_llm = self.llm.with_structured_output(GeneratedTopicFlashcards, method="json_schema", strict=True)
+        result: GeneratedTopicFlashcards = _invoke_with_backoff(structured_llm.invoke, [HumanMessage(content=prompt)])
+        return result.topic.strip(), [c.model_dump() for c in result.cards][:count]
 
-    def chat(self, session_id: str, user_input: str, mode: str | None = None, extra_tools=None) -> dict:
+    def generate_quiz_from_conversation(self, transcript: str, count: int = 5) -> tuple[str, list[dict]]:
+        """Generates up to `count` multiple-choice questions from what's
+        actually been discussed in a chat session (see recent_transcript())
+        -- the multiple-choice, explicitly-graded counterpart to
+        generate_flashcards_from_conversation(), built the same way and for
+        the same underlying reason: an answer is checked against
+        correct_index right there, client-side, rather than the old
+        approach this whole feature was deferred behind -- trying to infer
+        from free-form chat whether the student "seemed to get it". Same
+        "identify the topic yourself, draw on your own general knowledge,
+        don't force something unrelated" permissions as the flashcards
+        path.
+
+        Returns (topic, questions) -- empty ("", []) when the conversation
+        doesn't have enough of an actual subject yet, same convention as
+        generate_flashcards_from_conversation().
+
+        Each question dict has "question", "options" (exactly 4),
+        "correct_index" (0-3), and "explanation" -- shown to the student
+        right after they answer, right or wrong, so a miss is a learning
+        moment rather than just a red X. This is also what feeds a later
+        /retry-quiz: see record_quiz_results() / generate_retry_quiz().
+
+        Same structured-output mechanism, session-less one-shot call, and
+        raise-on-failure contract as generate_flashcards_from_conversation.
+        """
+        prompt = (
+            f"Create up to {count} multiple-choice study questions based on the conversation "
+            "below.\n\n"
+            "First, identify the main topic or concept the conversation is actually about -- "
+            "the thing the student would benefit from being quizzed on, not just whatever was "
+            "typed most recently. Then write questions that test real understanding of that "
+            "topic -- draw on your own general knowledge of the subject, not only facts that "
+            "happened to be typed out in the chat below. Each question needs exactly 4 answer "
+            "options with exactly one correct, and a short explanation of why the correct "
+            "answer is right (and ideally why the most tempting wrong option is wrong) -- the "
+            "explanation is shown to the student right after they answer. Keep all 4 options "
+            "genuinely plausible; avoid a giveaway option that's obviously wrong on its face. "
+            "If the conversation doesn't have enough of a topic to build questions from (e.g. "
+            "only greetings, or scheduling/GPA-only chat with no actual subject discussed), "
+            "set topic to an empty string and return an empty questions list instead of "
+            "forcing something unrelated.\n\n"
+            f"CONVERSATION:\n{transcript}"
+        )
+        structured_llm = self.llm.with_structured_output(GeneratedTopicQuiz, method="json_schema", strict=True)
+        result: GeneratedTopicQuiz = _invoke_with_backoff(structured_llm.invoke, [HumanMessage(content=prompt)])
+        return result.topic.strip(), [q.model_dump() for q in result.questions][:count]
+
+    def record_quiz_results(self, session_id: str, topic: str, answers: list[dict]) -> int:
+        """Appends one attempt per graded question to this session's quiz
+        history (see __init__), tagged with the topic it came from, so a
+        later generate_retry_quiz() call has real misses to draw on.
+        Grading is already done by the time this is called -- the frontend
+        checked chosen_index against correct_index the moment the student
+        answered -- this just records the outcome (see QuizAnswer /
+        POST /quiz/results).
+
+        Returns how many of the given answers were wrong, so the caller
+        (main.py's /quiz/results endpoint) can tell the student right away
+        without a second lookup.
+        """
+        attempts = self._quiz_attempts.setdefault(session_id, [])
+        wrong = 0
+        for a in answers:
+            correct = a["chosen_index"] == a["correct_index"]
+            if not correct:
+                wrong += 1
+            attempts.append({**a, "topic": topic, "correct": correct})
+        return wrong
+
+    def generate_retry_quiz(self, session_id: str, count: int = 5) -> tuple[str, list[dict]] | None:
+        """Generates a fresh multiple-choice quiz focused on what this
+        session has actually gotten wrong so far (see
+        record_quiz_results()) -- the "then generates an exam of those
+        plus similar questions" half of the originally-requested
+        retry-exam feature, now grounded in real graded attempts instead
+        of inferred from free-form chat.
+
+        Returns None if there's nothing to retry -- no quiz taken yet in
+        this session, or everything answered so far was correct -- so the
+        caller (main.py's /retry-quiz endpoint) can tell those two cases
+        apart with a clearer message than a generic empty result would.
+
+        Otherwise returns (topic, questions) in the same shape
+        generate_quiz_from_conversation() does. Roughly half the new
+        questions retest one of the missed concepts from a different angle
+        (never a verbatim repeat of the original question -- see the
+        prompt below); the rest are similar reinforcement questions on the
+        same topic(s). Same structured-output mechanism and
+        raise-on-failure contract as generate_quiz_from_conversation.
+        """
+        attempts = self._quiz_attempts.get(session_id, [])
+        if not attempts:
+            return None
+        wrong = [a for a in attempts if not a["correct"]]
+        if not wrong:
+            return None
+
+        missed_lines = "\n".join(
+            f'- Topic: {a["topic"]}\n'
+            f'  Q: {a["question"]}\n'
+            f'  They chose: "{a["options"][a["chosen_index"]]}" -- '
+            f'correct answer: "{a["options"][a["correct_index"]]}"'
+            for a in wrong
+        )
+        prompt = (
+            f"A student got the following multiple-choice questions wrong in a study "
+            f"session. Create up to {count} new multiple-choice questions to help them "
+            "review this material.\n\n"
+            "For roughly half the new questions, test the SAME underlying concept as one "
+            "of the missed questions below, from a different angle or a rephrased "
+            "scenario -- never a verbatim repeat of the original question. For the rest, "
+            "write related questions on the same topic(s) that reinforce the material "
+            "without being near-duplicates of each other or of the missed questions. Draw "
+            "on your own general knowledge of the topic(s), not only what's written below. "
+            "Each question needs exactly 4 answer options with exactly one correct, and a "
+            "short explanation of why the correct answer is right. Set topic to a short "
+            "label summarizing what this review covers.\n\n"
+            f"MISSED QUESTIONS:\n{missed_lines}"
+        )
+        structured_llm = self.llm.with_structured_output(GeneratedTopicQuiz, method="json_schema", strict=True)
+        result: GeneratedTopicQuiz = _invoke_with_backoff(structured_llm.invoke, [HumanMessage(content=prompt)])
+        return result.topic.strip(), [q.model_dump() for q in result.questions][:count]
+
+    def has_quiz_attempts(self, session_id: str) -> bool:
+        """Whether this session has recorded any graded quiz attempts at
+        all (right or wrong) -- lets a caller distinguish "hasn't taken a
+        quiz yet" from generate_retry_quiz()'s other None case, "took one
+        but hasn't missed anything", which need different messages (see
+        main.py's /retry-quiz).
+        """
+        return bool(self._quiz_attempts.get(session_id))
+
+    def chat(
+        self,
+        session_id: str,
+        user_input: str,
+        mode: str | None = None,
+        extra_tools=None,
+        exclude_tool_names: set[str] | None = None,
+        extra_system_prompt: str | None = None,
+    ) -> dict:
         """Runs one turn of the ReAct loop.
 
         extra_tools: optional request-scoped tools (e.g. a device-bound
         search_notebook) that apply to this call only -- see
         _tools_for_call. Never persisted into the session's own tool set.
+        exclude_tool_names: optional base tool names to leave out of this
+        call's toolset entirely (e.g. search_syllabus, when the student
+        has pinned specific notebook PDFs -- see main.py). Also never
+        persisted.
+        extra_system_prompt: optional extra ephemeral system instruction
+        for this call only, alongside the mode prompt (if any) -- see
+        _with_ephemeral. Used for e.g. the notebook-restriction note main.py
+        builds when notebook_doc_ids is set.
 
         Returns {"content": str, "sources": list[dict], "tools_used": list[str],
         "mode": str | None} instead of a bare string so the API layer can
@@ -417,13 +635,13 @@ class SyllabusAssistantAgent:
         mode_key = (mode or "").strip().lower()
         mode_prompt = MODE_PROMPTS.get(mode_key)
 
-        llm_with_tools, tools_map = self._tools_for_call(extra_tools)
+        llm_with_tools, tools_map = self._tools_for_call(extra_tools, exclude_tool_names)
 
         tools_used: list[str] = []
         sources: list[dict] = []
 
         for _ in range(self.max_turns):
-            call_messages = self._with_mode(history, mode_prompt)
+            call_messages = self._with_ephemeral(history, [mode_prompt, extra_system_prompt])
             try:
                 ai_msg: AIMessage = _invoke_with_backoff(llm_with_tools.invoke, call_messages)
             except Exception as e:
@@ -464,13 +682,21 @@ class SyllabusAssistantAgent:
             "mode": mode_key or None,
         }
 
-    def chat_stream(self, session_id: str, user_input: str, mode: str | None = None, extra_tools=None):
+    def chat_stream(
+        self,
+        session_id: str,
+        user_input: str,
+        mode: str | None = None,
+        extra_tools=None,
+        exclude_tool_names: set[str] | None = None,
+        extra_system_prompt: str | None = None,
+    ):
         """Generator twin of chat(): yields small event dicts as the turn
         progresses instead of returning one final dict, so the API layer can
         forward them to the client live over SSE.
 
-        extra_tools: same meaning as in chat() -- request-scoped tools
-        (e.g. a device-bound search_notebook) applying to this call only.
+        extra_tools / exclude_tool_names / extra_system_prompt: same
+        meaning as in chat().
 
         Event shapes:
           {"type": "tool", "name": ...}                                  -- a tool started running
@@ -502,13 +728,13 @@ class SyllabusAssistantAgent:
         mode_key = (mode or "").strip().lower()
         mode_prompt = MODE_PROMPTS.get(mode_key)
 
-        llm_with_tools, tools_map = self._tools_for_call(extra_tools)
+        llm_with_tools, tools_map = self._tools_for_call(extra_tools, exclude_tool_names)
 
         tools_used: list[str] = []
         sources: list[dict] = []
 
         for turn in range(self.max_turns):
-            call_messages = self._with_mode(history, mode_prompt)
+            call_messages = self._with_ephemeral(history, [mode_prompt, extra_system_prompt])
             is_tool_turn: bool | None = None
             chunks = []
 

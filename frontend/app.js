@@ -2,7 +2,12 @@ const API_BASE = "http://127.0.0.1:8000";
 
 const sessionId = crypto.randomUUID();
 let activeCourse = null; // null = search across all courses
-let currentMode = "";    // "" = normal, or "eli5" | "exam" | "teach"
+// Notebook doc_ids the student has pinned via the sidebar (see
+// renderNotebookChip) -- when non-empty, every chat turn is scoped to
+// exactly these PDFs (search_syllabus excluded, search_notebook restricted
+// to just these doc_ids; see backend/main.py's _notebook_scope). Sticky
+// like activeCourse: it stays set across messages until toggled off.
+let selectedNotebookDocIds = new Set();
 let activeController = null; // AbortController for the in-flight stream, if any
 
 // Identifies this browser for the private notebook feature (see
@@ -39,8 +44,8 @@ const sendBtn = document.getElementById("sendBtn");
 const stopBtn = document.getElementById("stopBtn");
 const courseList = document.getElementById("courseList");
 const activeCourseTab = document.getElementById("activeCourseTab");
+const notebookScopeTab = document.getElementById("notebookScopeTab");
 const resetBtn = document.getElementById("resetBtn");
-const modeBar = document.getElementById("modeBar");
 
 const addCourseBtn = document.getElementById("addCourseBtn");
 const addCourseForm = document.getElementById("addCourseForm");
@@ -146,7 +151,33 @@ function startStreamingCard() {
 
 function appendStreamToken(card, text) {
   card._fullText += text;
+  scheduleStreamRender(card);
+}
+
+// The expensive part of a token update -- reparsing + sanitizing the WHOLE
+// accumulated response and replacing the DOM subtree -- costs roughly
+// O(current length), so calling it on every single token (the old
+// behavior) makes a long response cost O(n^2) in total output length:
+// each new token re-renders everything that came before it too. That's
+// what caused visible, worsening lag specifically on /depth's much longer
+// answers -- ordinary short replies were never big enough for the
+// difference to be noticeable. Coalescing to at most one render per
+// animation frame (browsers paint ~60x/sec) bounds the number of full
+// re-renders by elapsed time instead of by token count; card._fullText
+// itself is still updated synchronously above, so nothing is lost, only
+// the expensive re-render is deferred and batched.
+function scheduleStreamRender(card) {
+  if (card._renderScheduled) return;
+  card._renderScheduled = true;
+  requestAnimationFrame(() => {
+    card._renderScheduled = false;
+    renderStreamedCard(card);
+  });
+}
+
+function renderStreamedCard(card) {
   const textEl = card.querySelector(".streamed-text");
+  if (!textEl) return;
   const cursor = card.querySelector(".stream-cursor");
   textEl.innerHTML = renderMarkdown(card._fullText);
   // Keep the cursor flowing right after the last rendered character,
@@ -177,9 +208,12 @@ function finalizeStreamingCard(card, data) {
   const liveMeta = card.querySelector(".card-meta.live");
   if (liveMeta) liveMeta.remove();
 
-  if (!data.response) {
-    card.querySelector(".streamed-text").innerHTML = renderMarkdown("(no response)");
-  }
+  // One final, synchronous render straight from the server's authoritative
+  // text -- a token render might still be waiting on its coalesced
+  // animation frame (see scheduleStreamRender) when "done" arrives, and
+  // this also covers the no-tokens-ever-streamed case (e.g. an empty
+  // reply) in one place instead of two.
+  card.querySelector(".streamed-text").innerHTML = renderMarkdown(data.response || "(no response)");
 
   const meta = document.createElement("div");
   meta.className = "card-meta";
@@ -227,9 +261,7 @@ function finalizeStreamingCard(card, data) {
 }
 
 const MODE_LABELS = {
-  eli5: "🧒 ELI5",
   exam: "📝 Exam Mode",
-  teach: "🎓 Teach Me",
   depth: "🧠 Deep Explainer",
 };
 
@@ -243,7 +275,11 @@ function addSolutionsButton(chip, { hasSolutions, label, uploadFn, onDone }) {
   btn.type = "button";
   btn.className = "course-chip-solutions" + (hasSolutions ? " attached" : "");
   btn.title = hasSolutions ? `Replace the solutions PDF for ${label}` : `Attach a solutions PDF for ${label}`;
-  btn.textContent = hasSolutions ? "✓ Solutions" : "🔑 Add solutions";
+  // Icon-only: this sits in a fixed-width slot next to the delete button
+  // (see .course-chip-solutions in style.css) -- the old "🔑 Add solutions"
+  // text label crowded that slot, so the tooltip above carries the label
+  // instead.
+  btn.textContent = hasSolutions ? "✓" : "🔑";
 
   const fileInput = document.createElement("input");
   fileInput.type = "file";
@@ -252,7 +288,7 @@ function addSolutionsButton(chip, { hasSolutions, label, uploadFn, onDone }) {
 
   const resetLabel = () => {
     btn.disabled = false;
-    btn.textContent = hasSolutions ? "✓ Solutions" : "🔑 Add solutions";
+    btn.textContent = hasSolutions ? "✓" : "🔑";
   };
 
   fileInput.addEventListener("change", async () => {
@@ -372,13 +408,48 @@ async function loadCourses() {
 // search_notebook always searches the whole notebook), with every entry
 // deletable since none of them are built-in.
 
+// Updates the small "📓 N PDF(s) only" pill in the deck header to reflect
+// selectedNotebookDocIds -- purely a display of that Set, never a source
+// of truth itself.
+function updateNotebookScopeTab() {
+  const n = selectedNotebookDocIds.size;
+  if (!n) {
+    notebookScopeTab.classList.add("hidden");
+    notebookScopeTab.textContent = "";
+    return;
+  }
+  notebookScopeTab.textContent = `📓 ${n} PDF${n === 1 ? "" : "s"} only`;
+  notebookScopeTab.classList.remove("hidden");
+}
+
 function renderNotebookChip(doc) {
   const chip = document.createElement("div");
-  chip.className = "course-chip";
+  chip.className = "course-chip" + (selectedNotebookDocIds.has(doc.doc_id) ? " notebook-selected" : "");
 
-  const main = document.createElement("div");
+  // Clicking pins/unpins this PDF for the chat context (see
+  // selectedNotebookDocIds and backend/main.py's _notebook_scope) -- unlike
+  // a course chip's single-select "which course am I filtering by", this
+  // is multi-select: any number of notebook docs can be pinned at once,
+  // toggled independently.
+  const main = document.createElement("button");
+  main.type = "button";
   main.className = "course-chip-main";
+  main.title = selectedNotebookDocIds.has(doc.doc_id)
+    ? `Pinned for this chat -- click to unpin "${doc.title}"`
+    : `Click to pin "${doc.title}" as the only source for this chat`;
   main.innerHTML = `<span class="code">📓 ${doc.page_count} page${doc.page_count === 1 ? "" : "s"}</span><span class="name">${doc.title}</span>`;
+  main.addEventListener("click", () => {
+    if (selectedNotebookDocIds.has(doc.doc_id)) {
+      selectedNotebookDocIds.delete(doc.doc_id);
+    } else {
+      selectedNotebookDocIds.add(doc.doc_id);
+    }
+    chip.classList.toggle("notebook-selected");
+    main.title = selectedNotebookDocIds.has(doc.doc_id)
+      ? `Pinned for this chat -- click to unpin "${doc.title}"`
+      : `Click to pin "${doc.title}" as the only source for this chat`;
+    updateNotebookScopeTab();
+  });
   chip.appendChild(main);
 
   addSolutionsButton(chip, {
@@ -414,6 +485,8 @@ function renderNotebookChip(doc) {
         { method: "DELETE" }
       );
       if (!res.ok) throw new Error(`status ${res.status}`);
+      selectedNotebookDocIds.delete(doc.doc_id);
+      updateNotebookScopeTab();
       loadNotebook();
     } catch (err) {
       alert("Couldn't remove that document — is the backend running?");
@@ -430,6 +503,18 @@ async function loadNotebook() {
     if (!res.ok) throw new Error(`status ${res.status}`);
     const docs = await res.json();
 
+    // A pinned doc that no longer exists server-side (deleted from another
+    // tab, say) shouldn't silently keep restricting the chat -- drop it.
+    const liveIds = new Set(docs.map((d) => d.doc_id));
+    let pruned = false;
+    for (const id of selectedNotebookDocIds) {
+      if (!liveIds.has(id)) {
+        selectedNotebookDocIds.delete(id);
+        pruned = true;
+      }
+    }
+    if (pruned) updateNotebookScopeTab();
+
     notebookList.innerHTML = "";
     if (!docs.length) {
       notebookList.innerHTML = `<p class="loading">Nothing here yet — add a PDF below.</p>`;
@@ -444,21 +529,24 @@ async function loadNotebook() {
 }
 
 // --- Slash commands: highlight overlay + "/" suggestion palette ---------
-// Three commands are recognized when typed as the leading token of the
+// Five commands are recognized when typed as the leading token of the
 // composer: /depth and /exam are one-shot mode overrides for that single
-// message (handled in the submit handler below, alongside currentMode);
-// /flashcards is its own command entirely (see FLASHCARDS_COMMAND_RE further
-// down) and is only listed here so it shows up in the suggestion box too.
+// message (handled in the submit handler below); /flashcards, /quiz, and
+// /retry are each their own command entirely (see FLASHCARDS_COMMAND_RE /
+// QUIZ_COMMAND_RE / RETRY_COMMAND_RE further down) and are only listed
+// here so they show up in the suggestion box too.
 const SLASH_COMMANDS = [
   { cmd: "depth", desc: "Deep, in-depth explanation for this message" },
   { cmd: "exam", desc: "Frame this message in exam-prep mode" },
-  { cmd: "flashcards", desc: "Generate a flashcard deck (course code or notebook title)" },
+  { cmd: "flashcards", desc: "Generate a flashcard deck from what we've discussed so far" },
+  { cmd: "quiz", desc: "Generate a graded multiple-choice quiz from what we've discussed" },
+  { cmd: "retry", desc: "A new quiz focused on what you've gotten wrong so far" },
 ];
 
 // A fully-typed, recognized command word at the very start of the message --
 // used both to color it blue in the overlay and, in the submit handler, to
 // decide whether this particular send carries a one-shot mode override.
-const LEADING_COMMAND_RE = /^\/(depth|exam|flashcards)\b/i;
+const LEADING_COMMAND_RE = /^\/(depth|exam|flashcards|quiz|retry)\b/i;
 
 // "/" plus an in-progress word and nothing else yet -- while this matches,
 // the student is still choosing a command, so the suggestion box stays open.
@@ -598,12 +686,15 @@ async function sendMessage(message, oneShotMode) {
         session_id: sessionId,
         message,
         course_code: activeCourse,
-        // A one-shot "/depth" or "/exam" typed into this message (see the
-        // composer's submit handler) wins for this request only -- it never
-        // touches currentMode, so the very next message with no command
-        // falls straight back to whatever the mode-bar has selected.
-        mode: oneShotMode || currentMode || null,
+        // "/depth"/"/exam" typed into this message (see the composer's
+        // submit handler) is one-shot -- it applies to this request only,
+        // with no sticky mode state to fall back to otherwise.
+        mode: oneShotMode || null,
         device_id: deviceId,
+        // Non-empty only when the student has pinned specific notebook
+        // PDFs in the sidebar (see selectedNotebookDocIds) -- see
+        // backend/main.py's _notebook_scope for what this does server-side.
+        notebook_doc_ids: Array.from(selectedNotebookDocIds),
       }),
       signal: activeController.signal,
     });
@@ -694,11 +785,15 @@ async function sendMessage(message, oneShotMode) {
 }
 
 // --- Flashcards: a /command, not a button -- see backend's POST /flashcards.
-// Typing "/flashcards" (optionally followed by a course code or notebook
-// title) is intercepted in the composer's submit handler above and never
-// reaches the normal chat loop at all; it hits its own endpoint and renders
-// its own interactive card type instead of a streamed reply.
-const FLASHCARDS_COMMAND_RE = /^\/flashcards(?:\s+(.*))?$/i;
+// Typing "/flashcards" is intercepted in the composer's submit handler
+// below and never reaches the normal chat loop at all; it hits its own
+// endpoint and renders its own interactive card type instead of a
+// streamed reply. v1.3 round 2: the deck's topic is inferred entirely
+// from what's been discussed in the session so far (see backend's
+// recent_transcript()/generate_flashcards_from_conversation()) -- any
+// text typed after "/flashcards" is ignored rather than treated as a
+// course code or notebook title.
+const FLASHCARDS_COMMAND_RE = /^\/flashcards\b/i;
 
 function addFlashcardDeckCard(deck) {
   const card = document.createElement("div");
@@ -768,23 +863,12 @@ async function handleFlashcardsCommand(raw) {
   renderComposerHighlight();
   setSending(true);
 
-  const match = raw.match(FLASHCARDS_COMMAND_RE);
-  const typedTarget = (match && match[1] ? match[1] : "").trim();
-  const target = typedTarget || activeCourse || "";
-
-  if (!target) {
-    addCard("error", "Usage: /flashcards <course code or notebook title> — or select a course in the sidebar first.");
-    setSending(false);
-    messageInput.focus();
-    return;
-  }
-
   const pending = addThinkingCard();
   try {
     const res = await fetch(`${API_BASE}/flashcards`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target, device_id: deviceId }),
+      body: JSON.stringify({ session_id: sessionId }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
@@ -800,15 +884,232 @@ async function handleFlashcardsCommand(raw) {
   }
 }
 
-// /depth and /exam are one-shot: the mode they carry only applies to this
-// single request (passed straight to sendMessage as an override that never
-// touches currentMode). Unlike an earlier version of this, the leading
-// command is NOT stripped out -- the literal text the student typed is what
-// gets shown in their chat bubble and what's sent as the message, exactly
-// like /flashcards already works. The mode prompt itself (see agent.py)
-// tells the model that a leading "/depth"/"/exam" token is just the
-// trigger, not part of the question, so nothing downstream gets confused
-// by it either.
+// --- Quiz mode + retry-exam: /quiz and /retry, not buttons -- see backend's
+// POST /quiz, POST /quiz/results, POST /retry-quiz. Same /command shape as
+// /flashcards above: intercepted in the submit handler below, never reaches
+// the normal chat loop, hits its own endpoint(s) and renders its own
+// interactive card instead of a streamed reply. Unlike flashcards, this one
+// talks to the backend a second time after it renders: once every question
+// is answered (grading itself already happened client-side, immediately,
+// the instant each one was answered), POST /quiz/results records what was
+// actually gotten right vs wrong so a later /retry can generate a
+// follow-up quiz targeting exactly that.
+const QUIZ_COMMAND_RE = /^\/quiz\b/i;
+const RETRY_COMMAND_RE = /^\/retry\b/i;
+
+function addQuizCard(deck) {
+  const card = document.createElement("div");
+  card.className = "card assistant quiz-deck";
+
+  const header = document.createElement("div");
+  header.className = "quiz-header";
+  const icon = deck.source === "retry" ? "🔁" : "📝";
+  header.innerHTML = `<span class="title">${icon} ${escapeHtml(deck.title)}</span><span>${deck.questions.length} questions</span>`;
+  card.appendChild(header);
+
+  const body = document.createElement("div");
+  card.appendChild(body);
+
+  const nav = document.createElement("div");
+  nav.className = "quiz-nav";
+  const prevBtn = document.createElement("button");
+  prevBtn.type = "button";
+  prevBtn.textContent = "← Prev";
+  const counter = document.createElement("span");
+  counter.className = "counter";
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.textContent = "Next →";
+  nav.append(prevBtn, counter, nextBtn);
+  card.appendChild(nav);
+
+  const finishBtn = document.createElement("button");
+  finishBtn.type = "button";
+  finishBtn.className = "quiz-finish-btn";
+  card.appendChild(finishBtn);
+
+  // answers[i] is null until question i is answered, then locked to the
+  // chosen option index -- clicking an already-answered question's options
+  // again is a no-op (see the click handler below), so a choice can't be
+  // changed after the fact once it's been graded.
+  const state = { index: 0, answers: new Array(deck.questions.length).fill(null) };
+
+  function answeredCount() {
+    return state.answers.filter((a) => a !== null).length;
+  }
+
+  function renderFinishBtn() {
+    const total = deck.questions.length;
+    const done = answeredCount();
+    finishBtn.disabled = done < total;
+    finishBtn.textContent = done < total
+      ? `Answer all questions to finish (${done}/${total})`
+      : "Finish quiz ✓";
+  }
+
+  function renderQuestion() {
+    const q = deck.questions[state.index];
+    const chosen = state.answers[state.index];
+
+    let html = `<div class="quiz-question">${renderMarkdown(q.question)}</div><div class="quiz-options">`;
+    q.options.forEach((opt, i) => {
+      const letter = String.fromCharCode(65 + i);
+      let cls = "quiz-option";
+      if (chosen !== null) {
+        if (i === chosen && i === q.correct_index) cls += " chosen-correct";
+        else if (i === chosen) cls += " chosen-wrong";
+        else if (i === q.correct_index) cls += " reveal-correct";
+      }
+      html += `<button type="button" class="${cls}" data-i="${i}" ${chosen !== null ? "disabled" : ""}><span class="letter">${letter}</span><p>${renderMarkdown(opt)}</p></button>`;
+    });
+    html += `</div>`;
+    if (chosen !== null) {
+      html += `<div class="quiz-explanation">${renderMarkdown(q.explanation)}</div>`;
+    }
+    body.innerHTML = html;
+
+    body.querySelectorAll(".quiz-option").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (state.answers[state.index] !== null) return;
+        state.answers[state.index] = Number(btn.dataset.i);
+        renderQuestion();
+        renderFinishBtn();
+      });
+    });
+
+    counter.textContent = `${state.index + 1} / ${deck.questions.length}`;
+    prevBtn.disabled = state.index === 0;
+    nextBtn.disabled = state.index === deck.questions.length - 1;
+  }
+
+  prevBtn.addEventListener("click", () => {
+    if (state.index === 0) return;
+    state.index -= 1;
+    renderQuestion();
+  });
+  nextBtn.addEventListener("click", () => {
+    if (state.index === deck.questions.length - 1) return;
+    state.index += 1;
+    renderQuestion();
+  });
+
+  function renderSummary(score, answers) {
+    nav.classList.add("hidden");
+    finishBtn.classList.add("hidden");
+
+    const total = deck.questions.length;
+    const wrongCount = total - score;
+    let html = `<div class="quiz-summary"><div class="score">${score} / ${total}</div><div class="score-detail">correct</div><ul class="quiz-summary-list">`;
+    deck.questions.forEach((q, i) => {
+      const correct = answers[i].chosen_index === q.correct_index;
+      const mark = correct ? `<span class="mark correct">✓</span>` : `<span class="mark wrong">✗</span>`;
+      html += `<li>${mark}<span>${escapeHtml(q.question)}</span></li>`;
+    });
+    html += `</ul>`;
+    if (wrongCount > 0) {
+      html += `<p class="retry-hint">Missed ${wrongCount}? Type <code>/retry</code> for a focused follow-up quiz.</p>`;
+    }
+    html += `</div>`;
+    body.innerHTML = html;
+  }
+
+  finishBtn.addEventListener("click", async () => {
+    if (answeredCount() < deck.questions.length) return;
+    const answers = deck.questions.map((q, i) => ({
+      question: q.question,
+      options: q.options,
+      correct_index: q.correct_index,
+      chosen_index: state.answers[i],
+    }));
+    const score = answers.filter((a) => a.chosen_index === a.correct_index).length;
+
+    try {
+      await fetch(`${API_BASE}/quiz/results`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, topic: deck.title, answers }),
+      });
+    } catch (err) {
+      // best-effort -- the score below is already known client-side
+      // either way, and /retry falls back to a clear "nothing recorded
+      // yet" message rather than failing outright if this never landed.
+    }
+
+    renderSummary(score, answers);
+  });
+
+  renderQuestion();
+  renderFinishBtn();
+  thread.appendChild(card);
+  thread.scrollTop = thread.scrollHeight;
+  return card;
+}
+
+async function handleQuizCommand(raw) {
+  addCard("user", raw);
+  messageInput.value = "";
+  renderComposerHighlight();
+  setSending(true);
+
+  const pending = addThinkingCard();
+  try {
+    const res = await fetch(`${API_BASE}/quiz`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
+
+    pending.remove();
+    addQuizCard(data);
+  } catch (err) {
+    pending.className = "card error";
+    pending.textContent = `Couldn't generate a quiz: ${err.message}`;
+  } finally {
+    setSending(false);
+    messageInput.focus();
+  }
+}
+
+async function handleRetryCommand(raw) {
+  addCard("user", raw);
+  messageInput.value = "";
+  renderComposerHighlight();
+  setSending(true);
+
+  const pending = addThinkingCard();
+  try {
+    const res = await fetch(`${API_BASE}/retry-quiz`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `status ${res.status}`);
+
+    pending.remove();
+    addQuizCard(data);
+  } catch (err) {
+    pending.className = "card error";
+    pending.textContent = `Couldn't generate a retry quiz: ${err.message}`;
+  } finally {
+    setSending(false);
+    messageInput.focus();
+  }
+}
+
+// /depth and /exam are the only way to reach either mode now (the older
+// mode-bar buttons and eli5/teach modes were removed entirely, frontend
+// and backend) and apply for exactly the message they're typed into --
+// passed straight to sendMessage as this request's mode, with no sticky
+// mode state anywhere to fall back to. The leading command is NOT
+// stripped out -- the literal text the student typed is what gets shown
+// in their chat bubble and what's sent as the message, exactly like
+// /flashcards already works. The mode prompt itself (see agent.py) tells
+// the model that a leading "/depth"/"/exam" token is just the trigger,
+// not part of the question, so nothing downstream gets confused by it
+// either.
 const CHAT_COMMAND_RE = /^\/(depth|exam)\b/i;
 
 composer.addEventListener("submit", (e) => {
@@ -822,20 +1123,22 @@ composer.addEventListener("submit", (e) => {
     return;
   }
 
+  if (QUIZ_COMMAND_RE.test(value)) {
+    handleQuizCommand(value);
+    return;
+  }
+
+  if (RETRY_COMMAND_RE.test(value)) {
+    handleRetryCommand(value);
+    return;
+  }
+
   const cmdMatch = value.match(CHAT_COMMAND_RE);
   sendMessage(value, cmdMatch ? cmdMatch[1].toLowerCase() : undefined);
 });
 
 stopBtn.addEventListener("click", () => {
   if (activeController) activeController.abort();
-});
-
-modeBar.addEventListener("click", (e) => {
-  const btn = e.target.closest(".mode-btn");
-  if (!btn) return;
-  document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
-  btn.classList.add("active");
-  currentMode = btn.dataset.mode || "";
 });
 
 resetBtn.addEventListener("click", async () => {

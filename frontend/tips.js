@@ -19,9 +19,10 @@
     "Set a target GPA and ask what grades you'd need \u2014 the planner works backward from it.",
     "Give a course code and ask for a study plan \u2014 topics and dates are pulled straight from the syllabus.",
     "Don't see your course? Add it in the sidebar \u2014 paste the text or upload a PDF.",
-    "Type \u201c/\u201d in the chatbox to see commands \u2014 /depth, /exam, /flashcards \u2014 with autocomplete.",
-    "Try Explain Like I'm 5 or Teach Me This Chapter from the bar above the chat for a different kind of answer.",
-    "Type /flashcards CS301 (or just /flashcards with a course selected) for a 10-card study deck.",
+    "Type \u201c/\u201d in the chatbox to see commands \u2014 /depth, /exam, /flashcards, /quiz, /retry \u2014 with autocomplete.",
+    "Click a PDF in your notebook to pin it \u2014 the chat grounds itself in just that document.",
+    "Chat about a topic for a bit, then type /flashcards for a 10-card deck built from that conversation.",
+    "Type /quiz for a graded multiple-choice quiz on what we've discussed \u2014 then /retry to review anything you missed.",
     "The whole conversation is remembered, so follow-ups don't need repeated context.",
     "If it's not in the syllabus, the answer says so instead of making something up.",
   ];

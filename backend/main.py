@@ -33,13 +33,43 @@ visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
 IP) before the agent is ever called, and every Groq call inside the
 agent retries with backoff on a 429 -- see backend/agent.py.
 
-Flashcards addition: POST /flashcards, a /command (typed into the
-composer, not a button -- see frontend/app.js) that generates a fixed
-10-card deck from a resolved course or notebook doc's material (plus its
-attached solutions, if any). Deliberately its own endpoint rather than a
-chat tool: it never touches ChatRequest, the agent's tool-calling loop, or
-any session history -- see agent.py's generate_flashcards for the one-shot
-structured-output call backing it.
+Flashcards addition: POST /flashcards, a bare "/flashcards" command
+(typed into the composer, not a button -- see frontend/app.js) that
+generates a 10-card deck from what's actually been discussed in that chat
+session. Deliberately its own endpoint rather than a chat tool: it never
+touches the agent's tool-calling loop, only session_id to pull the
+session's transcript -- see agent.py's recent_transcript() /
+generate_flashcards_from_conversation() for the one-shot structured-output
+call backing it. (v1.3 round 2: this replaced an earlier version that
+generated a deck from a resolved course's/notebook doc's raw material
+instead of the conversation.)
+
+v1.3 round 2 addition: ChatRequest.notebook_doc_ids lets a chat turn be
+pinned to exactly the notebook PDF(s) the student selected in the
+sidebar -- see _notebook_scope() just above the /chat endpoints, which
+resolves that into a doc_id-scoped search_notebook tool plus (when any
+doc is pinned) excludes search_syllabus/build_ai_study_plan from the
+toolset entirely and adds a short system note telling the model
+search_notebook is now its only grounding source. Also removed the
+eli5/teach modes and the mode-bar UI entirely, frontend and backend --
+ChatRequest.mode now only ever carries "depth" or "exam", both one-shot
+"/depth"/"/exam" commands typed into the composer (see agent.py's
+MODE_PROMPTS).
+
+Quiz addition (v1.3 round 3): POST /quiz, same /command-not-a-chat-message
+shape as /flashcards above, generates a 5-question multiple-choice quiz
+from the session's conversation (agent.py's
+generate_quiz_from_conversation()). Grading happens client-side the
+instant the student picks an answer -- POST /quiz/results just records
+the outcome server-side (agent.py's record_quiz_results()) once a quiz is
+finished, so POST /retry-quiz can generate a follow-up quiz targeting
+whatever that session has actually gotten wrong
+(generate_retry_quiz()) -- the real graded-quiz version of the
+originally-requested "retry exam" feature, in place of inferring
+correctness from free-form chat. DELETE /chat/{session_id} (reset)
+clears a session's quiz history alongside its chat history, so a retry
+quiz always draws on the conversation actually still in front of the
+student.
 """
 import json
 import os
@@ -68,6 +98,10 @@ from .models import (
     FlashcardDeck,
     FlashcardsRequest,
     NotebookDocInfo,
+    QuizDeck,
+    QuizQuestion,
+    QuizRequest,
+    QuizResultsRequest,
     ResetResponse,
     SourceChunk,
 )
@@ -86,7 +120,6 @@ from .rag import (
     add_notebook_solutions_to_vectorstore,
     add_pdf_course_to_vectorstore,
     build_syllabus_vectorstore,
-    get_course_full_text,
     remove_course_from_vectorstore,
 )
 from .rate_limit import check_and_increment
@@ -497,84 +530,104 @@ async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), fil
 
 
 # --- Flashcards -------------------------------------------------------------
-# A /command, not a chat message: frontend/app.js intercepts "/flashcards
-# ..." in the composer before it would ever reach POST /chat -- so this
-# endpoint never sees ChatRequest, the agent's tool loop, or any session
-# history. It just resolves a target (course code or notebook title) to
-# some material, hands that to agent.generate_flashcards(), and returns a
-# fixed-shape deck.
-
-MAX_FLASHCARD_SOURCE_CHARS = 24_000
-
-
-def _truncate_for_flashcards(text: str) -> str:
-    """Soft safety cap so a pathologically large upload can't blow the
-    prompt budget -- generate_flashcards' one-shot call has no
-    conversation history riding along, so this is a much smaller concern
-    than it would be for chat(), but an unbounded PDF is still worth
-    guarding against.
-    """
-    if len(text) <= MAX_FLASHCARD_SOURCE_CHARS:
-        return text
-    return text[:MAX_FLASHCARD_SOURCE_CHARS] + "\n\n[...material truncated for length...]"
+# A /command, not a chat message: frontend/app.js intercepts a bare
+# "/flashcards" in the composer before it would ever reach POST /chat -- so
+# this endpoint never sees ChatRequest or the agent's tool loop. v1.3 round
+# 2 reworked this from "resolve a named course/notebook target to its raw
+# material" to "read what's actually been discussed in this chat session
+# and build a deck around that topic" -- see agent.py's recent_transcript()
+# and generate_flashcards_from_conversation().
 
 
 @app.post("/flashcards", response_model=FlashcardDeck)
 def generate_flashcards_endpoint(req: FlashcardsRequest):
-    target = req.target.strip()
-    if not target:
+    transcript = agent.recent_transcript(req.session_id)
+    if not transcript:
         raise HTTPException(
-            status_code=422, detail="Specify a course code or notebook title, e.g. /flashcards CS301"
+            status_code=422,
+            detail="Nothing to build flashcards from yet -- chat about a topic first, then try /flashcards again.",
         )
 
-    code = target.upper()
-    registry = _course_registry()
-
-    if code in registry:
-        info = registry[code]
-        source_text = get_course_full_text(code) or ""
-        solutions_text = ""
-        custom = get_custom_course(code)
-        if custom and custom.get("solutions"):
-            solutions_text = "\n\n".join(p["text"] for p in custom["solutions"])
-        title = f"{code} \u2014 {info['course_name']}"
-        source_kind = "course"
-    else:
-        device_id = _require_device_id(req.device_id)
-        matches = [d for d in load_notebook_docs(device_id) if target.lower() in d["title"].lower()]
-        if len(matches) > 1:
-            names = ", ".join(f'"{m["title"]}"' for m in matches)
-            raise HTTPException(
-                status_code=422, detail=f"Multiple notebook docs match '{target}': {names} -- be more specific"
-            )
-        if not matches:
-            raise HTTPException(status_code=404, detail=f"No course or notebook document found matching '{target}'")
-        doc = matches[0]
-        source_text = "\n\n".join(p["text"] for p in doc.get("pages", []))
-        solutions_text = ""
-        if doc.get("solutions"):
-            solutions_text = "\n\n".join(p["text"] for p in doc["solutions"])
-        title = doc["title"]
-        source_kind = "notebook"
-
-    combined = source_text.strip()
-    if solutions_text:
-        combined = f"{combined}\n\n--- Answer key ---\n{solutions_text}"
-    combined = _truncate_for_flashcards(combined)
-
-    if not combined:
-        raise HTTPException(status_code=422, detail=f"'{target}' doesn't have any material indexed yet")
-
     try:
-        cards = agent.generate_flashcards(combined, title, count=10)
+        topic, cards = agent.generate_flashcards_from_conversation(transcript, count=10)
     except Exception as e:
         detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate flashcards: {e}"
         raise HTTPException(status_code=502, detail=detail)
 
-    if not cards:
-        raise HTTPException(status_code=502, detail="The model didn't return any flashcards -- please try again")
+    if not cards or not topic:
+        raise HTTPException(
+            status_code=422,
+            detail="Couldn't find a clear topic in the conversation yet -- chat a bit more about what you're studying, then try /flashcards again.",
+        )
 
-    return FlashcardDeck(title=title, source=source_kind, cards=[Flashcard(**c) for c in cards])
+    return FlashcardDeck(title=topic, source="conversation", cards=[Flashcard(**c) for c in cards])
+
+
+# --- Quiz mode + retry-exam --------------------------------------------
+# Same /command pattern as flashcards above: bare "/quiz" and "/retry" are
+# intercepted client-side and never reach POST /chat. Grading is explicit
+# and client-side too -- correct_index ships down with the quiz, and the
+# frontend checks each answer the instant the student picks one -- these
+# endpoints only ever generate questions and (via /quiz/results) record
+# what actually happened, so /retry-quiz has real misses to work from
+# instead of trying to infer them from free-form chat. See agent.py's
+# generate_quiz_from_conversation() / record_quiz_results() /
+# generate_retry_quiz().
+
+
+@app.post("/quiz", response_model=QuizDeck)
+def generate_quiz_endpoint(req: QuizRequest):
+    transcript = agent.recent_transcript(req.session_id)
+    if not transcript:
+        raise HTTPException(
+            status_code=422,
+            detail="Nothing to build a quiz from yet -- chat about a topic first, then try /quiz again.",
+        )
+
+    try:
+        topic, questions = agent.generate_quiz_from_conversation(transcript, count=5)
+    except Exception as e:
+        detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate a quiz: {e}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    if not questions or not topic:
+        raise HTTPException(
+            status_code=422,
+            detail="Couldn't find a clear topic in the conversation yet -- chat a bit more about what you're studying, then try /quiz again.",
+        )
+
+    return QuizDeck(title=topic, source="conversation", questions=[QuizQuestion(**q) for q in questions])
+
+
+@app.post("/quiz/results")
+def record_quiz_results_endpoint(req: QuizResultsRequest):
+    if not req.answers:
+        raise HTTPException(status_code=422, detail="No answers to record")
+    wrong = agent.record_quiz_results(req.session_id, req.topic, [a.model_dump() for a in req.answers])
+    return {"status": "recorded", "graded": len(req.answers), "wrong": wrong}
+
+
+@app.post("/retry-quiz", response_model=QuizDeck)
+def generate_retry_quiz_endpoint(req: QuizRequest):
+    try:
+        result = agent.generate_retry_quiz(req.session_id, count=5)
+    except Exception as e:
+        detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate a retry quiz: {e}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    if result is None:
+        detail = (
+            "Nice \u2014 you've got everything right so far! Take another /quiz to keep practicing."
+            if agent.has_quiz_attempts(req.session_id)
+            else "You haven't taken a quiz in this conversation yet -- try /quiz first, then /retry to focus on anything you missed."
+        )
+        raise HTTPException(status_code=422, detail=detail)
+
+    topic, questions = result
+    if not questions:
+        raise HTTPException(status_code=502, detail="Couldn't generate a retry quiz -- please try again.")
+
+    return QuizDeck(title=topic, source="retry", questions=[QuizQuestion(**q) for q in questions])
 
 
 def _prefixed_input(req: ChatRequest) -> str:
@@ -582,6 +635,40 @@ def _prefixed_input(req: ChatRequest) -> str:
     if req.course_code:
         user_input = f"[Course context: {req.course_code}] {user_input}"
     return user_input
+
+
+NOTEBOOK_RESTRICTION_PROMPT = (
+    "The student has pinned specific notebook PDF(s) for this conversation -- "
+    "search_notebook is restricted to exactly those document(s), and search_syllabus "
+    "isn't available this turn. Treat search_notebook as your only source of grounding: "
+    "call it for anything that needs grounding, and if it doesn't cover the question, "
+    "say so plainly rather than answering from outside knowledge or general syllabus "
+    "familiarity."
+)
+
+
+def _notebook_scope(req: ChatRequest):
+    """Resolves the request-scoped search_notebook tool plus, when the
+    student has pinned specific PDF(s) via ChatRequest.notebook_doc_ids,
+    the extra pieces needed to make "these PDFs only" actually mean only:
+    exclude_tool_names leaves search_syllabus (and the syllabus-driven
+    build_ai_study_plan) out of the toolset entirely for this call rather
+    than just asking the model not to use them, and extra_system_prompt
+    tells the model why and what to do instead. Returns
+    (extra_tools, exclude_tool_names, extra_system_prompt) -- the last two
+    are None/None when nothing is pinned, so behavior for every existing
+    caller (no notebook_doc_ids) is unchanged.
+    """
+    if not req.device_id:
+        return None, None, None
+
+    doc_ids = [d.strip() for d in (req.notebook_doc_ids or []) if d.strip()] or None
+    extra_tools = [make_notebook_tool(vectorstore, req.device_id, doc_ids=doc_ids)]
+    if not doc_ids:
+        return extra_tools, None, None
+
+    exclude_tool_names = {"search_syllabus", "build_ai_study_plan"}
+    return extra_tools, exclude_tool_names, NOTEBOOK_RESTRICTION_PROMPT
 
 
 # This is where the frontend sends the users messages
@@ -597,8 +684,15 @@ def chat(req: ChatRequest, request: Request):
             detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
         )
 
-    extra_tools = [make_notebook_tool(vectorstore, req.device_id)] if req.device_id else None
-    result = agent.chat(session_id=req.session_id, user_input=_prefixed_input(req), mode=req.mode, extra_tools=extra_tools)
+    extra_tools, exclude_tool_names, extra_system_prompt = _notebook_scope(req)
+    result = agent.chat(
+        session_id=req.session_id,
+        user_input=_prefixed_input(req),
+        mode=req.mode,
+        extra_tools=extra_tools,
+        exclude_tool_names=exclude_tool_names,
+        extra_system_prompt=extra_system_prompt,
+    )
     return ChatResponse(
         session_id=req.session_id,
         response=result["content"],
@@ -642,11 +736,18 @@ def chat_stream(req: ChatRequest, request: Request):
         )
 
     user_input = _prefixed_input(req)
-    extra_tools = [make_notebook_tool(vectorstore, req.device_id)] if req.device_id else None
+    extra_tools, exclude_tool_names, extra_system_prompt = _notebook_scope(req)
 
     def event_stream():
         try:
-            for event in agent.chat_stream(session_id=req.session_id, user_input=user_input, mode=req.mode, extra_tools=extra_tools):
+            for event in agent.chat_stream(
+                session_id=req.session_id,
+                user_input=user_input,
+                mode=req.mode,
+                extra_tools=extra_tools,
+                exclude_tool_names=exclude_tool_names,
+                extra_system_prompt=extra_system_prompt,
+            ):
                 if event.get("type") == "done":
                     event = {**event, "grounded": bool(event.get("sources"))}
                 yield f"data: {json.dumps(event)}\n\n"

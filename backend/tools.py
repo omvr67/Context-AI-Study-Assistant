@@ -395,7 +395,7 @@ def make_tools(vectorstore):
     ]
 
 
-def make_notebook_tool(vectorstore, device_id: str):
+def make_notebook_tool(vectorstore, device_id: str, doc_ids: list[str] | None = None):
     """Builds a search_notebook tool scoped to exactly one device's private
     PDFs. Unlike make_tools() above (called once at startup, shared across
     every session), this is built fresh per chat turn in main.py, once the
@@ -406,6 +406,14 @@ def make_notebook_tool(vectorstore, device_id: str):
     model call -- confused, or steered by adversarial content in a
     retrieved document -- to search a different device's notebook than the
     one that actually made this request.
+
+    doc_ids, when given, further narrows the search to exactly those
+    notebook doc_ids -- this is how "pin these PDF(s) for this
+    conversation" (main.py's ChatRequest.notebook_doc_ids) is enforced:
+    same closure-not-argument reasoning as device_id above, so the model
+    itself has no way to widen the search back out. A doc's attached
+    solutions PDF (see notebook_store.py) is indexed under that same
+    doc_id, so pinning a doc still searches its answer key too.
     """
 
     @tool
@@ -425,6 +433,8 @@ def make_notebook_tool(vectorstore, device_id: str):
             query: What to look up in the student's own uploaded PDFs.
         """
         search_filter = {"device_id": device_id, "notebook": True}
+        if doc_ids:
+            search_filter["doc_id"] = {"$in": doc_ids}
         try:
             docs = vectorstore.similarity_search(query, k=3, filter=search_filter, fetch_k=40)
         except Exception as e:

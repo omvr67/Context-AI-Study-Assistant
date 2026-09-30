@@ -14,6 +14,7 @@
   --rail-width: 260px;
   --command-blue: #2E5AAC;
   --command-blue-soft: #E8EEFB;
+  --content-max-width: 50rem;
 }
 
 * {
@@ -189,6 +190,17 @@ body.rail-collapsed .deck-header {
   background: #2A2519;
 }
 
+/* Notebook docs pinned for the chat context (see selectedNotebookDocIds in
+   app.js) -- deliberately a different color than .active's warm gold,
+   since this is a separate, multi-select concept (any number of PDFs can
+   be pinned at once) from a course chip's single-select "which course am
+   I filtering by". Blue ties it visually to the same command-palette blue
+   used for /depth, /exam, /flashcards. */
+.course-chip.notebook-selected {
+  border-color: var(--command-blue);
+  background: #16233A;
+}
+
 .course-chip-main {
   flex: 1;
   display: flex;
@@ -222,12 +234,16 @@ body.rail-collapsed .deck-header {
 
 .course-chip-delete {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
   border: none;
+  border-left: 1px solid #302C22;
   background: transparent;
   color: #8C8170;
   font-size: 1.05rem;
   line-height: 1;
-  padding: 0 12px;
   cursor: pointer;
 }
 
@@ -238,19 +254,20 @@ body.rail-collapsed .deck-header {
 
 .course-chip-solutions {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
   border: none;
   border-left: 1px solid #302C22;
   background: transparent;
   color: #8C8170;
-  font-size: 0.72rem;
-  font-family: "IBM Plex Mono", monospace;
-  white-space: nowrap;
-  padding: 0 10px;
+  font-size: 0.85rem;
   cursor: pointer;
 }
 .course-chip-solutions:hover {
   color: #F7F4EC;
-  background: #1E1B14;
+  background: #2A2519;
 }
 .course-chip-solutions.attached {
   color: #A68A5B;
@@ -365,6 +382,9 @@ body.rail-collapsed .deck-header {
   padding: 18px 28px;
   border-bottom: 1px solid #DDD5BE;
   background: var(--paper);
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .tab {
@@ -376,6 +396,12 @@ body.rail-collapsed .deck-header {
   border-radius: 999px;
 }
 
+.tab.notebook-scope {
+  border-color: var(--command-blue);
+  color: var(--command-blue);
+  background: var(--command-blue-soft);
+}
+
 .thread {
   flex: 1;
   overflow-y: auto;
@@ -384,6 +410,9 @@ body.rail-collapsed .deck-header {
   flex-direction: column;
   gap: 14px;
   background: var(--paper);
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
 }
 
 .card {
@@ -696,8 +725,203 @@ body.rail-collapsed .deck-header {
   font-family: "IBM Plex Mono", monospace;
 }
 
+/* ---------- Quiz deck (see the /quiz and /retry commands in app.js) ---------- */
+.card.quiz-deck {
+  max-width: 460px;
+  width: 100%;
+}
+
+.quiz-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.quiz-header .title {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.quiz-question {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.quiz-question p {
+  margin: 0;
+}
+
+.quiz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quiz-option {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--paper-dim);
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.quiz-option:hover:not(:disabled) {
+  background: #E3DCC6;
+}
+.quiz-option:disabled {
+  cursor: default;
+}
+.quiz-option .letter {
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 600;
+  color: var(--accent-warm);
+  flex: 0 0 auto;
+}
+.quiz-option p {
+  margin: 0;
+}
+
+.quiz-option.chosen-correct,
+.quiz-option.reveal-correct {
+  background: #E4F0E8;
+  border-color: #3D7A52;
+}
+.quiz-option.chosen-correct .letter,
+.quiz-option.reveal-correct .letter {
+  color: #3D7A52;
+}
+.quiz-option.chosen-wrong {
+  background: #F5E2DE;
+  border-color: #B04B3A;
+}
+.quiz-option.chosen-wrong .letter {
+  color: #B04B3A;
+}
+
+.quiz-explanation {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: var(--paper-dim);
+  border-left: 3px solid var(--accent-warm);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  color: var(--ink);
+  line-height: 1.5;
+}
+.quiz-explanation p {
+  margin: 0;
+}
+
+.quiz-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  gap: 8px;
+}
+.quiz-nav button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.quiz-nav button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.quiz-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.quiz-nav .counter {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.quiz-finish-btn {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #F7F4EC;
+  font-weight: 500;
+  cursor: pointer;
+}
+.quiz-finish-btn:disabled {
+  background: var(--border);
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.quiz-summary {
+  text-align: center;
+}
+.quiz-summary .score {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 6px 0;
+}
+.quiz-summary .score-detail {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.quiz-summary .retry-hint {
+  margin-top: 12px;
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+.quiz-summary .retry-hint code {
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 600;
+  color: var(--command-blue);
+  background: var(--command-blue-soft);
+  padding: 1px 5px;
+  border-radius: var(--radius);
+}
+.quiz-summary-list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.quiz-summary-list li {
+  display: flex;
+  gap: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--ink);
+}
+.quiz-summary-list .mark {
+  flex: 0 0 auto;
+}
+.quiz-summary-list .mark.correct {
+  color: #3D7A52;
+}
+.quiz-summary-list .mark.wrong {
+  color: #B04B3A;
+}
+
 @media (max-width: 720px) {
-  .card.flashcard-deck {
+  .card.flashcard-deck,
+  .card.quiz-deck {
     max-width: 100%;
   }
 }
@@ -757,25 +981,36 @@ body.rail-collapsed .deck-header {
 
 .composer {
   display: flex;
-  gap: 10px;
-  padding: 18px 28px;
-  border-top: 1px solid #DDD5BE;
-  background: var(--paper);
+  align-items: center;
+  gap: 6px;
+  max-width: var(--content-max-width);
+  width: calc(100% - 56px);
+  margin: 0 auto 22px;
+  padding: 8px 8px 8px 20px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  box-shadow: 0 10px 30px rgba(21, 19, 15, 0.10), 0 2px 8px rgba(21, 19, 15, 0.06);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.composer:focus-within {
+  border-color: var(--accent-warm);
+  box-shadow: 0 0 0 3px rgba(166, 138, 91, 0.22), 0 10px 30px rgba(21, 19, 15, 0.10);
 }
 
 .composer input {
   flex: 1;
-  padding: 11px 14px;
-  border: 1px solid #DDD5BE;
-  border-radius: var(--radius);
+  padding: 10px 4px;
+  border: none;
+  border-radius: 0;
   font-size: 0.95rem;
   font-family: inherit;
-  background: #ffffff;
+  background: transparent;
 }
 
 .composer input:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
 }
 
 /* ---------- v1.3: slash-command highlight overlay + suggestion palette ---------
@@ -810,16 +1045,15 @@ body.rail-collapsed .deck-header {
   position: absolute;
   inset: 0;
   z-index: 0;
-  padding: 11px 14px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  padding: 10px 4px;
+  border: none;
   font-size: 0.95rem;
   font-family: inherit;
   line-height: 1.4;
   white-space: pre;
   overflow: hidden;
   pointer-events: none;
-  background: #ffffff;
+  background: transparent;
   color: var(--ink);
 }
 
@@ -835,12 +1069,12 @@ body.rail-collapsed .deck-header {
 .command-suggestions {
   position: absolute;
   left: 0;
-  right: 0;
-  bottom: calc(100% + 8px);
+  right: 12px;
+  bottom: calc(100% + 12px);
   z-index: 5;
   background: #ffffff;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 16px;
   box-shadow: 0 10px 28px rgba(21, 19, 15, 0.16);
   overflow: hidden;
 }
@@ -872,11 +1106,12 @@ body.rail-collapsed .deck-header {
 }
 
 .composer button {
-  padding: 0 20px;
+  flex: 0 0 auto;
+  padding: 10px 20px;
   background: var(--accent);
   color: #F7F4EC;
   border: none;
-  border-radius: var(--radius);
+  border-radius: 20px;
   font-weight: 500;
   cursor: pointer;
 }
@@ -896,37 +1131,6 @@ body.rail-collapsed .deck-header {
 
 .hidden {
   display: none !important;
-}
-
-/* ---------- v1.1: mode toggle bar ---------- */
-.mode-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 12px 28px;
-  border-bottom: 1px solid #DDD5BE;
-  background: var(--paper);
-}
-
-.mode-btn {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.76rem;
-  padding: 6px 12px;
-  border-radius: 999px;
-  border: 1px solid #DDD5BE;
-  background: #ffffff;
-  color: #6E6858;
-  cursor: pointer;
-}
-
-.mode-btn:hover {
-  border-color: var(--accent);
-}
-
-.mode-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #F7F4EC;
 }
 
 .badge.mode {
@@ -1074,6 +1278,18 @@ body.rail-collapsed .deck-header {
   .rail-expand-tab {
     display: none !important;
   }
+  /* The floating composer's fixed 56px side margin (calc(100% - 56px))
+     and .thread/.tip-strip's 28px padding are sized for desktop breathing
+     room -- both eat too much of a narrow screen, so trim them here. */
+  .composer {
+    width: calc(100% - 24px);
+    padding-left: 16px;
+  }
+  .thread,
+  .tip-strip {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 /* ---------- Tip strip ----------
@@ -1087,6 +1303,9 @@ body.rail-collapsed .deck-header {
   opacity: 1;
   overflow: hidden;
   background: var(--paper);
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
   transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
 }
 .tip-strip.done {
