@@ -1,20 +1,73 @@
+/* ==========================================================================
+   Context AI -- frontend styles, built to DESIGN.md (Apple design system).
+
+   Rules this file follows (see DESIGN.md):
+   - One accent: Action Blue (--primary). No second accent color anywhere.
+   - Surfaces: parchment canvas, white utility cards, pure-black nav rail,
+     near-black tiles. The color change is the divider, not a border.
+   - Radii: 8 (sm) / 11 (md) / 18 (lg) / pill. Nothing in between.
+   - No shadows and no gradients. "Floating" comes from an inset position,
+     a hairline, and frosted backdrop blur (the floating-sticky-bar recipe).
+   - Type ladder is 300 / 400 / 600 / 700 -- weight 500 is deliberately absent.
+   - Buttons press with transform: scale(0.95). Hover states aren't defined.
+   - Single documented exception: the wordmark + welcome greeting share the
+     brand italic (Newsreader), by explicit request.
+   ========================================================================== */
+
 :root {
-  --ink: #15130F;
-  --paper: #F7F4EC;
-  --paper-dim: #EAE4D3;
-  --rail: #15130F;
-  --rail-text: #F3EEE0;
-  --accent: #5B564A;
-  --accent-warm: #A68A5B;
-  --user-bubble: #15130F;
-  --user-text: #F7F4EC;
-  --border: #DDD5BE;
-  --text-muted: #6E6858;
-  --radius: 2px;
+  /* colors */
+  --primary: #0066cc;
+  --primary-focus: #0071e3;
+  --primary-on-dark: #2997ff;
+  --on-primary: #ffffff;
+  --ink: #1d1d1f;
+  --body-on-dark: #ffffff;
+  --body-muted: #cccccc;
+  --ink-muted-80: #333333;
+  --ink-muted-48: #7a7a7a;
+  --divider-soft: #f0f0f0;
+  --hairline: #e0e0e0;
+  --hairline-soft: rgba(0, 0, 0, 0.08);
+  --canvas: #ffffff;
+  --parchment: #f5f5f7;
+  --pearl: #fafafc;
+  --tile-1: #272729;
+  --tile-2: #2a2a2c;
+  --black: #000000;
+  --chip-translucent: rgba(210, 210, 215, 0.64);
+  --canvas-frosted: rgba(255, 255, 255, 0.8);
+  --parchment-frosted: rgba(245, 245, 247, 0.8);
+
+  /* radii */
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 18px;
+  --r-pill: 9999px;
+
+  /* spacing */
+  --sp-xxs: 4px;
+  --sp-xs: 8px;
+  --sp-sm: 12px;
+  --sp-md: 17px;
+  --sp-lg: 24px;
+  --sp-xl: 32px;
+
+  /* type */
+  --font-text: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  --font-brand: "Newsreader", Georgia, serif; /* logo + welcome greeting */
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace; /* code only */
+
+  /* layout */
   --rail-width: 260px;
-  --command-blue: #2E5AAC;
-  --command-blue-soft: #E8EEFB;
-  --content-max-width: 50rem;
+  --gutter: var(--sp-xl);
+  /* Chat content spans the whole deck while the sidebar is open, and locks
+     to a centered ~980px column only when it's collapsed (see below). */
+  --content-max: 10000px;
+}
+
+body.rail-collapsed {
+  --content-max: 980px;
 }
 
 * {
@@ -28,15 +81,41 @@ body {
 
 body {
   margin: 0;
-  background: var(--paper-dim);
+  background: var(--parchment);
   color: var(--ink);
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: var(--font-text);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
 }
 
 .app {
   display: grid;
   grid-template-columns: var(--rail-width) 6px 1fr;
   height: 100vh;
+  background: var(--parchment);
   transition: grid-template-columns 0.18s ease;
 }
 
@@ -50,15 +129,16 @@ body.rail-resizing .app {
   -webkit-user-select: none;
 }
 
-/* ---------- Left rail: course tabs, styled like a card index ---------- */
+/* ---------- Left rail: global-nav surface (pure black) ---------- */
 .rail {
   position: relative;
-  background: var(--rail);
-  color: var(--rail-text);
-  padding: 28px 22px;
+  min-height: 0;
+  background: var(--black);
+  color: var(--body-on-dark);
+  padding: var(--sp-xl) var(--sp-lg);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--sp-md);
   overflow-x: hidden;
   overflow-y: auto;
   transition: opacity 0.15s ease;
@@ -72,25 +152,21 @@ body.rail-collapsed .rail {
 
 .rail-collapse-btn {
   position: absolute;
-  top: 28px;
-  right: 20px;
+  top: 30px;
+  right: var(--sp-lg);
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   background: transparent;
-  color: var(--rail-text);
+  color: var(--body-on-dark);
   padding: 0;
   margin: 0;
-  cursor: pointer;
-  transition: color 0.15s ease;
 }
 
-.rail-collapse-btn:hover {
-  color: var(--accent-warm);
-}
-
-/* Drag-to-resize track between the rail and the main deck */
+/* Drag-to-resize track between the rail and the main deck. The color change
+   between rail and deck is the divider, so the track is invisible until
+   it's actually being dragged. */
 .rail-resize-handle {
   position: relative;
   cursor: col-resize;
@@ -102,12 +178,11 @@ body.rail-collapsed .rail {
   top: 0;
   bottom: 0;
   left: 2px;
-  width: 1px;
-  background: var(--border);
+  width: 2px;
+  background: transparent;
 }
-.rail-resize-handle:hover::after,
 body.rail-resizing .rail-resize-handle::after {
-  background: var(--accent-warm);
+  background: var(--primary);
 }
 body.rail-collapsed .rail-resize-handle {
   pointer-events: none;
@@ -117,88 +192,76 @@ body.rail-collapsed .rail-resize-handle {
 .rail-expand-tab {
   display: none;
   position: fixed;
-  top: 20px;
+  top: 16px;
   left: 20px;
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--ink);
   padding: 0;
   margin: 0;
-  cursor: pointer;
   z-index: 30;
   align-items: center;
   justify-content: center;
-  transition: color 0.15s ease;
 }
 
 body.rail-collapsed .rail-expand-tab {
   display: flex;
 }
 
-.rail-expand-tab:hover {
-  color: var(--accent-warm);
+body.rail-collapsed .deck-header {
+  padding-left: 60px;
 }
 
-body.rail-collapsed .deck-header {
-  padding-left: 52px;
-}
 .wordmark {
-  font-family: "Newsreader", Georgia, serif;
+  font-family: var(--font-brand);
   font-style: italic;
   font-weight: 600;
-  font-size: 1.6rem;
-  line-height: 1.15;
+  font-size: 28px;
+  line-height: 1.14;
+  letter-spacing: -0.28px;
   margin: 0;
-  color: #F7F4EC;
+  color: var(--body-on-dark);
 }
 
 .rail-caption {
-  font-size: 0.78rem;
-  letter-spacing: 0.02em;
-  color: #A79A82;
-  margin: -8px 0 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: -0.12px;
+  color: var(--body-muted);
+  margin: 0;
 }
 
 .rail-section-heading {
-  margin: 6px 0 4px;
-  padding-top: 16px;
-  border-top: 1px solid #302C22;
+  margin-top: var(--sp-xs);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--body-on-dark);
 }
 
 .course-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--sp-xs);
   flex: 1;
 }
 
+/* Course + notebook chips: compact utility cards on the near-black tile.
+   Selected = 2px Action Blue (on-dark variant) ring, same as the
+   configurator-option-chip-selected pattern. */
 .course-chip {
   display: flex;
   align-items: stretch;
-  border: 1px solid #302C22;
-  border-radius: var(--radius);
-  background: #1E1B14;
+  border: 2px solid transparent;
+  border-radius: var(--r-lg);
+  background: var(--tile-1);
   overflow: hidden;
 }
 
-.course-chip:hover {
-  border-color: var(--accent-warm);
-}
-
-.course-chip.active {
-  border-color: var(--accent-warm);
-  background: #2A2519;
-}
-
-/* Notebook docs pinned for the chat context (see selectedNotebookDocIds in
-   app.js) -- deliberately a different color than .active's warm gold,
-   since this is a separate, multi-select concept (any number of PDFs can
-   be pinned at once) from a course chip's single-select "which course am
-   I filtering by". Blue ties it visually to the same command-palette blue
-   used for /depth, /exam, /flashcards. */
+.course-chip.active,
 .course-chip.notebook-selected {
-  border-color: var(--command-blue);
-  background: #16233A;
+  border-color: var(--primary-on-dark);
 }
 
 .course-chip-main {
@@ -206,221 +269,339 @@ body.rail-collapsed .deck-header {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 10px 12px;
+  padding: 10px 14px;
   border: none;
   background: transparent;
-  cursor: pointer;
+  color: inherit;
   text-align: left;
-  font: inherit;
   min-width: 0;
 }
 
 .course-chip-main .code {
   display: block;
-  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--accent-warm);
-  font-size: 0.82rem;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--body-on-dark);
 }
 
 .course-chip-main .name {
   display: block;
-  font-size: 0.82rem;
-  color: var(--rail-text);
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: -0.12px;
+  color: var(--body-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.course-chip-delete {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  border: none;
-  border-left: 1px solid #302C22;
-  background: transparent;
-  color: #8C8170;
-  font-size: 1.05rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.course-chip-delete:hover {
-  color: #F7F4EC;
-  background: #33221C;
-}
-
+.course-chip-delete,
 .course-chip-solutions {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
+  width: 34px;
   border: none;
-  border-left: 1px solid #302C22;
   background: transparent;
-  color: #8C8170;
-  font-size: 0.85rem;
-  cursor: pointer;
+  color: var(--body-muted);
+  font-size: 14px;
+  line-height: 1;
 }
-.course-chip-solutions:hover {
-  color: #F7F4EC;
-  background: #2A2519;
+
+.course-chip-delete {
+  font-size: 17px;
 }
+
 .course-chip-solutions.attached {
-  color: #A68A5B;
+  color: var(--primary-on-dark);
 }
 .course-chip-solutions:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
+.pdf-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  background: var(--chip-translucent);
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  vertical-align: middle;
+}
+
+/* Ghost pill (button-secondary-pill, on-dark variant) */
 .add-course-btn {
   background: transparent;
-  border: 1px dashed #302C22;
-  color: #A79A82;
-  padding: 9px 10px;
-  border-radius: var(--radius);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.add-course-btn:hover {
-  color: var(--rail-text);
-  border-color: var(--accent-warm);
+  border: 1px solid var(--primary-on-dark);
+  color: var(--primary-on-dark);
+  padding: 8px 16px;
+  border-radius: var(--r-pill);
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
 }
 
 .add-course-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid #302C22;
-  border-radius: var(--radius);
-  background: #1A170F;
+  gap: var(--sp-xs);
+  padding: var(--sp-md);
+  border-radius: var(--r-lg);
+  background: var(--tile-1);
 }
 .add-course-form.hidden {
   display: none;
 }
 
-.add-course-form input,
+.add-course-form input:not([type="checkbox"]):not([type="file"]),
+.add-course-form textarea,
+.add-course-form input[type="file"] {
+  background: var(--black);
+  border: none;
+  color: var(--body-on-dark);
+  border-radius: var(--r-pill);
+  padding: 10px 16px;
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+}
 .add-course-form textarea {
-  background: #15130F;
-  border: 1px solid #302C22;
-  color: var(--rail-text);
-  border-radius: var(--radius);
-  padding: 8px 10px;
-  font-family: inherit;
-  font-size: 0.82rem;
+  border-radius: var(--r-lg);
+  padding: 12px 16px;
   resize: vertical;
 }
-.add-course-form input:focus,
-.add-course-form textarea:focus {
-  outline: none;
-  border-color: var(--accent-warm);
+.add-course-form ::placeholder {
+  color: var(--ink-muted-48);
+}
+.add-course-form input[type="file"] {
+  color: var(--body-muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.add-course-form input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  padding: 4px 12px;
+  border: 1px solid var(--primary-on-dark);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--primary-on-dark);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .add-course-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-xs);
 }
 .add-course-actions button {
   flex: 1;
-  padding: 7px 10px;
-  border-radius: var(--radius);
-  font-size: 0.8rem;
-  cursor: pointer;
-  border: 1px solid #302C22;
+  padding: 8px 16px;
+  border-radius: var(--r-pill);
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
 }
+/* button-primary */
 .add-course-actions button[type="submit"] {
-  background: var(--accent-warm);
-  border-color: var(--accent-warm);
-  color: #15130F;
-  font-weight: 600;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  color: var(--on-primary);
 }
+/* ghost pill */
 .add-course-actions button[type="button"] {
   background: transparent;
-  color: #A79A82;
+  border: 1px solid var(--primary-on-dark);
+  color: var(--primary-on-dark);
 }
 
 .add-course-status {
-  font-size: 0.76rem;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: -0.12px;
   min-height: 1em;
   margin: 0;
+  color: var(--body-muted);
 }
 .add-course-status.success {
-  color: #566B44;
+  color: var(--primary-on-dark);
 }
 .add-course-status.error {
-  color: #8C4A3A;
+  color: var(--body-on-dark);
+  font-weight: 600;
 }
 
+/* Add-a-syllabus tabs (paste text / upload PDF): option chips */
+.add-course-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: var(--sp-xxs);
+}
+
+.tab-btn {
+  flex: 1;
+  background: var(--black);
+  border: 2px solid transparent;
+  color: var(--body-on-dark);
+  padding: 6px 8px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  line-height: 1.29;
+  letter-spacing: -0.12px;
+}
+.tab-btn.active {
+  border-color: var(--primary-on-dark);
+}
+
+.add-course-subform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+}
+
+.append-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: -0.12px;
+  color: var(--body-muted);
+}
+.append-check input {
+  accent-color: var(--primary);
+}
+
+/* button-dark-utility: the nav-bar utility button */
 .reset-btn {
   margin-top: auto;
-  background: transparent;
-  border: 1px solid #302C22;
-  color: #A79A82;
-  padding: 9px 10px;
-  border-radius: var(--radius);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.reset-btn:hover {
-  color: var(--rail-text);
-  border-color: var(--rail-text);
+  background: var(--ink);
+  border: none;
+  color: var(--body-on-dark);
+  padding: 8px 15px;
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
 }
 
 /* ---------- Main deck ---------- */
 .deck {
+  position: relative;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--parchment);
 }
 
+/* sub-nav-frosted: parchment @ 80% + blur, 52px, hairline separator */
 .deck-header {
-  padding: 18px 28px;
-  border-bottom: 1px solid #DDD5BE;
-  background: var(--paper);
+  flex: 0 0 auto;
+  height: 52px;
+  padding: 0 var(--gutter);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-sm);
+  background: var(--parchment-frosted);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--hairline-soft);
+  z-index: 20;
 }
 
 .tab {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.8rem;
-  padding: 4px 10px;
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  border-radius: 999px;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.19;
+  letter-spacing: 0.231px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Pinned notebook scope: ghost pill in Action Blue */
 .tab.notebook-scope {
-  border-color: var(--command-blue);
-  color: var(--command-blue);
-  background: var(--command-blue-soft);
+  flex: 0 0 auto;
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  padding: 4px 12px;
+  border: 1px solid var(--primary);
+  border-radius: var(--r-pill);
+  color: var(--primary);
+}
+
+/* The scroll area spans the full deck; --pad-x centers a ~980px column only
+   when the sidebar is collapsed. Bottom padding keeps the last message
+   clear of the floating dock, which the thread scrolls underneath. */
+.thread,
+.dock {
+  --pad-x: max(var(--gutter), calc((100% - var(--content-max)) / 2));
 }
 
 .thread {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  background: var(--paper);
-  width: 100%;
-  max-width: var(--content-max-width);
-  margin: 0 auto;
+  gap: var(--sp-sm);
+  padding: var(--sp-lg) var(--pad-x) 168px;
+  background: var(--parchment);
+  transition: padding-left 0.18s ease, padding-right 0.18s ease;
 }
 
+/* ---------- Welcome (rotating greeting, see welcome.js) ---------- */
+.welcome {
+  margin: auto 0;
+  padding: var(--sp-xl) 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-sm);
+  text-align: center;
+  animation: card-in 0.3s ease-out;
+}
+
+.welcome-greeting {
+  margin: 0;
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-weight: 600;
+  font-size: 56px;
+  line-height: 1.07;
+  letter-spacing: -0.28px;
+  color: var(--ink);
+}
+
+.welcome-sub {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--ink-muted-80);
+}
+
+/* ---------- Cards ---------- */
 .card {
-  max-width: 62ch;
-  padding: 12px 16px;
-  border-radius: var(--radius);
-  line-height: 1.5;
-  font-size: 0.95rem;
+  max-width: min(100%, 62ch);
+  padding: var(--sp-md) var(--sp-lg);
+  border-radius: var(--r-lg);
+  line-height: 1.47;
+  font-size: 17px;
   white-space: pre-wrap;
   animation: card-in 0.18s ease-out;
 }
@@ -440,12 +621,53 @@ body.rail-collapsed .deck-header {
   margin: 0;
 }
 
+/* store-utility-card: white, 1px hairline, 18px radius */
+.card.assistant {
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  align-self: flex-start;
+}
+
+/* dark tile */
+.card.user {
+  background: var(--ink);
+  color: var(--body-on-dark);
+  align-self: flex-end;
+}
+
+.card.error {
+  background: var(--tile-1);
+  color: var(--body-on-dark);
+  align-self: flex-start;
+}
+
+.card.recap {
+  background: var(--pearl);
+  border: 1px solid var(--hairline);
+  align-self: center;
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  max-width: 46ch;
+}
+
+.recap-label {
+  margin: 0 0 var(--sp-xxs);
+  font-weight: 600;
+  color: var(--ink);
+}
+
 /* Assistant replies and the reset recap are rendered from real markdown
    (see renderMarkdown() in app.js), so they get normal block flow instead
    of the pre-wrap treatment plain-text cards (user/error/thinking) use. */
 .card.assistant,
 .card.recap {
   white-space: normal;
+}
+
+.card.assistant strong,
+.card.recap strong {
+  font-weight: 600;
 }
 
 .card.assistant h1,
@@ -461,21 +683,24 @@ body.rail-collapsed .deck-header {
 .card.recap h5,
 .card.recap h6 {
   margin: 0.8em 0 0.4em;
-  line-height: 1.3;
-  font-family: "Newsreader", Georgia, serif;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.19;
+  letter-spacing: -0.374px;
   color: var(--ink);
 }
 .card.assistant :first-child,
 .card.recap :first-child {
   margin-top: 0;
 }
-.card.assistant h1, .card.recap h1 { font-size: 1.65rem; }
-.card.assistant h2, .card.recap h2 { font-size: 1.38rem; }
-.card.assistant h3, .card.recap h3 { font-size: 1.18rem; }
-.card.assistant h4, .card.recap h4 { font-size: 1.05rem; }
-.card.assistant h5, .card.recap h5 { font-size: 0.98rem; }
-.card.assistant h6, .card.recap h6 { font-size: 0.95rem; }
+.card.assistant h1, .card.recap h1 { font-size: 28px; line-height: 1.14; }
+.card.assistant h2, .card.recap h2 { font-size: 21px; letter-spacing: 0.231px; }
+.card.assistant h3, .card.recap h3,
+.card.assistant h4, .card.recap h4,
+.card.assistant h5, .card.recap h5,
+.card.assistant h6, .card.recap h6 { font-size: 17px; }
+.card.recap h1, .card.recap h2, .card.recap h3,
+.card.recap h4, .card.recap h5, .card.recap h6 { font-size: 14px; letter-spacing: -0.224px; }
 
 .card.assistant p,
 .card.recap p {
@@ -502,27 +727,27 @@ body.rail-collapsed .deck-header {
 .card.recap blockquote {
   margin: 0.6em 0;
   padding: 1px 0 1px 12px;
-  border-left: 2px solid var(--accent-warm);
-  color: var(--text-muted);
-  font-style: italic;
+  border-left: 2px solid var(--hairline);
+  color: var(--ink-muted-80);
 }
 
 .card.assistant code,
 .card.recap code {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.86em;
-  background: var(--paper-dim);
-  padding: 1px 5px;
-  border-radius: 3px;
+  letter-spacing: 0;
+  background: var(--parchment);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
 }
 
 .card.assistant pre,
 .card.recap pre {
   margin: 0.6em 0;
-  padding: 12px 14px;
-  background: #15130F;
-  color: #F3EEE0;
-  border-radius: var(--radius);
+  padding: var(--sp-sm) 14px;
+  background: var(--tile-1);
+  color: var(--body-on-dark);
+  border-radius: var(--r-sm);
   overflow-x: auto;
   white-space: pre;
 }
@@ -531,7 +756,7 @@ body.rail-collapsed .deck-header {
   background: transparent;
   padding: 0;
   color: inherit;
-  font-size: 0.82rem;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -539,47 +764,47 @@ body.rail-collapsed .deck-header {
 .card.recap table {
   border-collapse: collapse;
   margin: 0.6em 0;
-  font-size: 0.87rem;
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
   width: 100%;
 }
 .card.assistant th,
 .card.assistant td,
 .card.recap th,
 .card.recap td {
-  border: 1px solid var(--border);
-  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  padding: 6px 10px;
   text-align: left;
 }
 .card.assistant th,
 .card.recap th {
-  background: var(--paper-dim);
+  background: var(--parchment);
   font-weight: 600;
 }
 
 .card.assistant hr,
 .card.recap hr {
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--hairline);
   margin: 0.8em 0;
 }
 
 .card.assistant a,
 .card.recap a {
-  color: var(--accent);
-  text-decoration-color: var(--border);
-  text-underline-offset: 2px;
+  color: var(--primary);
+  text-decoration: none;
 }
-.card.assistant a:hover,
-.card.recap a:hover {
-  text-decoration-color: currentColor;
+.card.assistant a:active,
+.card.recap a:active {
+  text-decoration: underline;
 }
 
 .card.thinking {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: #8C8170;
-  font-style: italic;
+  gap: var(--sp-xs);
+  color: var(--ink-muted-48);
 }
 
 .dots {
@@ -590,7 +815,7 @@ body.rail-collapsed .deck-header {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #8C8170;
+  background: var(--ink-muted-48);
   animation: dot-bounce 1s infinite ease-in-out;
 }
 .dots span:nth-child(2) {
@@ -612,41 +837,6 @@ body.rail-collapsed .deck-header {
   }
 }
 
-.card.assistant {
-  background: #FDFBF5;
-  border: 1px solid #DDD5BE;
-  align-self: flex-start;
-  border-left: 3px solid var(--accent);
-}
-
-.card.user {
-  background: var(--user-bubble);
-  color: var(--user-text);
-  align-self: flex-end;
-  border-left: 3px solid var(--accent-warm);
-}
-
-.card.error {
-  background: #2E2019;
-  color: #F7F4EC;
-  align-self: flex-start;
-  border-left: 3px solid #8C4A3A;
-}
-
-.card.recap {
-  background: #EFEAD9;
-  border: 1px dashed var(--accent);
-  align-self: center;
-  font-size: 0.86rem;
-  max-width: 46ch;
-}
-
-.recap-label {
-  margin: 0 0 4px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
 /* ---------- Flashcard deck (see the /flashcards command in app.js) ---------- */
 .card.flashcard-deck {
   max-width: 420px;
@@ -659,8 +849,10 @@ body.rail-collapsed .deck-header {
   align-items: baseline;
   gap: 10px;
   margin-bottom: 10px;
-  font-size: 0.82rem;
-  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 .flashcard-header .title {
   font-weight: 600;
@@ -668,29 +860,25 @@ body.rail-collapsed .deck-header {
 }
 
 .flashcard-face {
-  min-height: 110px;
-  padding: 18px 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--paper-dim);
+  min-height: 120px;
+  padding: var(--sp-lg);
+  border-radius: var(--r-lg);
+  background: var(--parchment);
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
   cursor: pointer;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  transition: background 0.15s ease;
-}
-.flashcard-face:hover {
-  background: #E3DCC6;
+  font-size: 17px;
+  line-height: 1.47;
 }
 .flashcard-face .side-label {
   display: block;
-  font-size: 0.68rem;
-  letter-spacing: 0.05em;
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--accent-warm);
+  color: var(--ink-muted-48);
   margin-bottom: 6px;
 }
 .flashcard-face p {
@@ -704,28 +892,29 @@ body.rail-collapsed .deck-header {
   margin-top: 10px;
 }
 .flashcard-nav button {
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  padding: 6px 16px;
+  border: 1px solid var(--primary);
+  border-radius: var(--r-pill);
   background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 0.82rem;
-}
-.flashcard-nav button:hover:not(:disabled) {
-  border-color: var(--accent);
+  color: var(--primary);
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
 }
 .flashcard-nav button:disabled {
-  opacity: 0.4;
+  border-color: var(--hairline);
+  color: var(--ink-muted-48);
   cursor: default;
 }
 .flashcard-nav .counter {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
+  color: var(--ink-muted-48);
 }
 
-/* ---------- Quiz deck (see the /quiz and /retry commands in app.js) ---------- */
+/* ---------- Quiz deck (see the /quiz and /retry commands in app.js) ----------
+   Ported onto the DESIGN.md tokens. No second accent: "correct" reuses the
+   configurator-option-chip-selected treatment (2px Focus Blue border), and
+   "wrong" is an ink fill -- so the two read apart without red/green. */
 .card.quiz-deck {
   max-width: 460px;
   width: 100%;
@@ -737,133 +926,143 @@ body.rail-collapsed .deck-header {
   align-items: baseline;
   gap: 10px;
   margin-bottom: 10px;
-  font-size: 0.82rem;
-  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 .quiz-header .title {
   font-weight: 600;
   color: var(--ink);
 }
 
-.quiz-question {
-  font-size: 0.95rem;
-  line-height: 1.5;
-  margin-bottom: 12px;
+.quiz-question,
+.quiz-option,
+.quiz-explanation {
+  /* .card is white-space: pre-wrap, which keeps the trailing newline the
+     markdown renderer emits after each <p> and leaves dead space below the text */
+  white-space: normal;
 }
-.quiz-question p {
-  margin: 0;
+
+.quiz-question {
+  font-size: 17px;
+  line-height: 1.47;
+  margin-bottom: var(--sp-sm);
 }
 
 .quiz-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--sp-xs);
 }
 
 .quiz-option {
   display: flex;
   align-items: baseline;
-  gap: 9px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--paper-dim);
+  gap: var(--sp-xs);
+  padding: var(--sp-sm) var(--sp-md);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--parchment);
+  color: var(--ink);
   text-align: left;
-  cursor: pointer;
-  font-size: 0.9rem;
-  line-height: 1.45;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.quiz-option:hover:not(:disabled) {
-  background: #E3DCC6;
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
 }
 .quiz-option:disabled {
   cursor: default;
+  color: var(--ink);
 }
 .quiz-option .letter {
-  font-family: "IBM Plex Mono", monospace;
-  font-weight: 600;
-  color: var(--accent-warm);
   flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--ink-muted-48);
 }
-.quiz-option p {
-  margin: 0;
+.card.quiz-deck .quiz-question p,
+.card.quiz-deck .quiz-option p,
+.card.quiz-deck .quiz-explanation p {
+  margin: 0; /* out-rank .card.assistant p's paragraph margin */
+}
+/* app.js wraps each option's markdown (already a <p>) in another <p>, which the
+   HTML parser splits into stray empty <p>s -- don't let them become flex items */
+.card.quiz-deck .quiz-option p:empty {
+  display: none;
 }
 
 .quiz-option.chosen-correct,
 .quiz-option.reveal-correct {
-  background: #E4F0E8;
-  border-color: #3D7A52;
+  background: var(--canvas);
+  border: 2px solid var(--primary-focus);
+  /* the border is 1px thicker than the default -- take it back out of the
+     padding so the option doesn't grow when it's graded */
+  padding: calc(var(--sp-sm) - 1px) calc(var(--sp-md) - 1px);
 }
 .quiz-option.chosen-correct .letter,
 .quiz-option.reveal-correct .letter {
-  color: #3D7A52;
+  color: var(--primary);
 }
 .quiz-option.chosen-wrong {
-  background: #F5E2DE;
-  border-color: #B04B3A;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--body-on-dark);
 }
 .quiz-option.chosen-wrong .letter {
-  color: #B04B3A;
+  color: var(--body-muted);
 }
 
 .quiz-explanation {
   margin-top: 10px;
-  padding: 10px 14px;
-  background: var(--paper-dim);
-  border-left: 3px solid var(--accent-warm);
-  border-radius: var(--radius);
-  font-size: 0.85rem;
-  color: var(--ink);
-  line-height: 1.5;
-}
-.quiz-explanation p {
-  margin: 0;
+  padding: var(--sp-sm) var(--sp-md);
+  background: var(--parchment);
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 
 .quiz-nav {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 12px;
-  gap: 8px;
+  margin-top: var(--sp-sm);
+  gap: var(--sp-xs);
 }
 .quiz-nav button {
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  padding: 6px 16px;
+  border: 1px solid var(--primary);
+  border-radius: var(--r-pill);
   background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 0.82rem;
-}
-.quiz-nav button:hover:not(:disabled) {
-  border-color: var(--accent);
+  color: var(--primary);
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
 }
 .quiz-nav button:disabled {
-  opacity: 0.4;
+  border-color: var(--hairline);
+  color: var(--ink-muted-48);
   cursor: default;
 }
 .quiz-nav .counter {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
+  color: var(--ink-muted-48);
 }
 
 .quiz-finish-btn {
   width: 100%;
   margin-top: 10px;
-  padding: 10px;
+  padding: 11px 22px;
   border: none;
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: #F7F4EC;
-  font-weight: 500;
-  cursor: pointer;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: 17px;
+  line-height: 1.24;
 }
 .quiz-finish-btn:disabled {
-  background: var(--border);
-  color: var(--text-muted);
+  background: var(--parchment);
+  color: var(--ink-muted-48);
   cursor: default;
 }
 
@@ -871,27 +1070,28 @@ body.rail-collapsed .deck-header {
   text-align: center;
 }
 .quiz-summary .score {
-  font-size: 1.6rem;
-  font-weight: 700;
-  color: var(--accent);
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
   margin: 6px 0;
 }
 .quiz-summary .score-detail {
-  font-size: 0.82rem;
-  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-48);
 }
 .quiz-summary .retry-hint {
-  margin-top: 12px;
-  font-size: 0.85rem;
+  margin-top: var(--sp-sm);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
   color: var(--ink);
 }
 .quiz-summary .retry-hint code {
-  font-family: "IBM Plex Mono", monospace;
   font-weight: 600;
-  color: var(--command-blue);
-  background: var(--command-blue-soft);
-  padding: 1px 5px;
-  border-radius: var(--radius);
+  color: var(--primary);
 }
 .quiz-summary-list {
   margin: 14px 0 0;
@@ -904,29 +1104,25 @@ body.rail-collapsed .deck-header {
 }
 .quiz-summary-list li {
   display: flex;
-  gap: 8px;
-  font-size: 0.82rem;
-  line-height: 1.4;
+  gap: var(--sp-xs);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
   color: var(--ink);
 }
 .quiz-summary-list .mark {
   flex: 0 0 auto;
 }
 .quiz-summary-list .mark.correct {
-  color: #3D7A52;
+  color: var(--primary);
 }
 .quiz-summary-list .mark.wrong {
-  color: #B04B3A;
+  color: var(--ink-muted-48);
 }
 
-@media (max-width: 720px) {
-  .card.flashcard-deck,
-  .card.quiz-deck {
-    max-width: 100%;
-  }
-}
-
-.card-meta {
+/* ---------- Badges, sources ---------- */
+.card-meta,
+.card-meta.live {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -934,263 +1130,71 @@ body.rail-collapsed .deck-header {
 }
 
 .badge {
-  font-size: 0.72rem;
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: -0.12px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
   white-space: nowrap;
 }
 
 .badge.grounded {
-  background: #E9E3CF;
-  color: #5B564A;
-  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--primary);
 }
 
 .badge.tool {
-  background: var(--paper);
-  color: #6E6858;
-  border: 1px solid #DDD5BE;
+  background: var(--pearl);
+  color: var(--ink-muted-80);
+  border: 1px solid var(--divider-soft);
+}
+
+.badge.mode {
+  background: var(--ink);
+  color: var(--body-on-dark);
+  border: 1px solid var(--ink);
+}
+
+.badge.tool.pending {
+  opacity: 0.65;
 }
 
 .sources {
-  margin-top: 8px;
-  font-size: 0.8rem;
+  margin-top: var(--sp-xs);
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
 }
 
 .sources summary {
   cursor: pointer;
-  color: var(--accent);
-  font-weight: 500;
+  color: var(--primary);
 }
 
 .source-item {
   margin: 6px 0 0;
-  padding: 6px 8px;
-  background: var(--paper-dim);
-  border-radius: var(--radius);
-  color: #5C5647;
+  padding: var(--sp-xs) var(--sp-sm);
+  background: var(--parchment);
+  border-radius: var(--r-sm);
+  color: var(--ink-muted-80);
 }
 
 .source-code {
-  font-family: "IBM Plex Mono", monospace;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--ink);
   margin-right: 6px;
 }
 
-.composer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: var(--content-max-width);
-  width: calc(100% - 56px);
-  margin: 0 auto 22px;
-  padding: 8px 8px 8px 20px;
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 26px;
-  box-shadow: 0 10px 30px rgba(21, 19, 15, 0.10), 0 2px 8px rgba(21, 19, 15, 0.06);
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
-
-.composer:focus-within {
-  border-color: var(--accent-warm);
-  box-shadow: 0 0 0 3px rgba(166, 138, 91, 0.22), 0 10px 30px rgba(21, 19, 15, 0.10);
-}
-
-.composer input {
-  flex: 1;
-  padding: 10px 4px;
-  border: none;
-  border-radius: 0;
-  font-size: 0.95rem;
-  font-family: inherit;
-  background: transparent;
-}
-
-.composer input:focus {
-  outline: none;
-}
-
-/* ---------- v1.3: slash-command highlight overlay + suggestion palette ---------
-   #messageInput's own text is made transparent (caret still visible) and
-   #composerHighlight -- an absolutely-positioned twin with identical font/
-   padding/border-box -- is drawn underneath it, mirroring the same text but
-   with a recognized leading command ("/depth", "/exam", "/flashcards")
-   wrapped in a blue span. app.js keeps the two in sync on every keystroke,
-   including scrollLeft so long lines still line up while scrolled. */
-.composer-input-wrap {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-
-.composer-input-wrap input {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  background: transparent;
-  color: transparent;
-  caret-color: var(--ink);
+.stopped-note {
+  margin: var(--sp-xs) 0 0;
+  font-size: 12px;
   line-height: 1.4;
+  letter-spacing: -0.12px;
+  color: var(--ink-muted-48);
 }
 
-.composer-input-wrap input::placeholder {
-  color: #8C8170;
-  -webkit-text-fill-color: #8C8170;
-}
-
-.composer-highlight {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  padding: 10px 4px;
-  border: none;
-  font-size: 0.95rem;
-  font-family: inherit;
-  line-height: 1.4;
-  white-space: pre;
-  overflow: hidden;
-  pointer-events: none;
-  background: transparent;
-  color: var(--ink);
-}
-
-/* Color only -- never weight, size, or spacing here. Changing anything that
-   affects glyph width would make this span render wider/narrower than the
-   same (invisible) text underneath it in the real input, throwing the caret
-   out of sync with what's visually on screen. Color is metric-free, so it's
-   the only safe way to distinguish the command token. */
-.composer-highlight .cmd-token {
-  color: var(--command-blue);
-}
-
-.command-suggestions {
-  position: absolute;
-  left: 0;
-  right: 12px;
-  bottom: calc(100% + 12px);
-  z-index: 5;
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: 0 10px 28px rgba(21, 19, 15, 0.16);
-  overflow: hidden;
-}
-
-.command-suggestion-item {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 9px 14px;
-  cursor: pointer;
-}
-
-.command-suggestion-item .cmd {
-  font-family: "IBM Plex Mono", monospace;
-  font-weight: 600;
-  font-size: 0.85rem;
-  color: var(--command-blue);
-  white-space: nowrap;
-}
-
-.command-suggestion-item .desc {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-}
-
-.command-suggestion-item:hover,
-.command-suggestion-item.active {
-  background: var(--command-blue-soft);
-}
-
-.composer button {
-  flex: 0 0 auto;
-  padding: 10px 20px;
-  background: var(--accent);
-  color: #F7F4EC;
-  border: none;
-  border-radius: 20px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.composer button:hover {
-  background: #46422F;
-}
-.composer button:disabled {
-  background: #8C8170;
-  cursor: not-allowed;
-}
-
-.loading {
-  font-size: 0.8rem;
-  color: #6E6858;
-}
-
-.hidden {
-  display: none !important;
-}
-
-.badge.mode {
-  background: #EFEAD9;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-}
-
-/* ---------- v1.1: add-a-syllabus tabs (paste text / upload PDF) ---------- */
-.add-course-tabs {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-
-.tab-btn {
-  flex: 1;
-  background: transparent;
-  border: 1px solid #302C22;
-  color: #A79A82;
-  padding: 6px 8px;
-  border-radius: var(--radius);
-  font-size: 0.76rem;
-  cursor: pointer;
-}
-
-.tab-btn.active {
-  background: var(--accent-warm);
-  border-color: var(--accent-warm);
-  color: #15130F;
-  font-weight: 600;
-}
-
-.add-course-subform {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.append-check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.76rem;
-  color: #A79A82;
-}
-
-.pdf-tag {
-  display: inline-block;
-  margin-left: 6px;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.68rem;
-  color: #15130F;
-  background: var(--accent-warm);
-  padding: 1px 5px;
-  border-radius: 3px;
-  vertical-align: middle;
-}
-
-/* ---------- v1.1: streaming assistant card ---------- */
+/* ---------- Streaming assistant card ---------- */
 .card.streaming {
   position: relative;
 }
@@ -1200,7 +1204,7 @@ body.rail-collapsed .deck-header {
   width: 7px;
   height: 1em;
   margin-left: 2px;
-  background: var(--accent);
+  background: var(--ink);
   vertical-align: text-bottom;
   animation: cursor-blink 0.9s steps(1) infinite;
 }
@@ -1216,41 +1220,236 @@ body.rail-collapsed .deck-header {
   }
 }
 
-.card-meta.live {
+/* ---------- Floating dock: tip chip + composer ----------
+   Sits slightly above the bottom edge of the deck (spacing.lg) so the
+   chatbox floats. The thread scrolls underneath it; the frosted blur is
+   what lifts it off the content -- no drop shadow (DESIGN.md reserves the
+   one shadow for product photography). */
+.dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--sp-lg);
+  z-index: 10;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
+  flex-direction: column;
+  padding: 0 var(--pad-x);
+  pointer-events: none;
+  transition: padding-left 0.18s ease, padding-right 0.18s ease;
+}
+.dock > * {
+  pointer-events: auto;
 }
 
-.badge.tool.pending {
-  opacity: 0.65;
-  font-style: italic;
+/* Tip strip: a ghosted one-line chip above the composer that cycles once
+   through the tips (see tips.js), then collapses away. */
+.tip-strip {
+  align-self: flex-start;
+  max-width: 100%;
+  max-height: 44px;
+  margin-bottom: var(--sp-xs);
+  opacity: 1;
+  overflow: hidden;
+  transition: max-height 0.4s ease, opacity 0.4s ease, margin 0.4s ease;
+}
+.tip-strip.done {
+  max-height: 0;
+  opacity: 0;
+  margin-bottom: 0;
 }
 
-.stopped-note {
-  margin: 8px 0 0;
-  font-size: 0.78rem;
-  font-style: italic;
-  color: #8C8170;
+.tip-strip-text {
+  display: inline-block;
+  padding: 6px 14px;
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-48);
+  background: var(--canvas-frosted);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-radius: var(--r-pill);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.tip-strip-text.swap {
+  opacity: 0;
+  transform: translateY(3px);
 }
 
-/* ---------- v1.1: stop button ---------- */
-#stopBtn {
-  padding: 0 20px;
-  background: #6B392F;
-  color: #F7F4EC;
+/* Composer: search-input grammar (pill, hairline) on the frosted-bar recipe */
+.composer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-xs);
+  min-height: 60px;
+  padding: var(--sp-xs) var(--sp-xs) var(--sp-xs) var(--sp-lg);
+  background: var(--canvas-frosted);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-pill);
+}
+
+.composer:focus-within {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 0;
+}
+
+/* Slash-command highlight overlay + suggestion palette.
+   #messageInput's own text is made transparent (caret still visible) and
+   #composerHighlight -- an absolutely-positioned twin with identical font/
+   padding -- is drawn underneath it, mirroring the same text but with a
+   recognized leading command wrapped in a blue span. app.js keeps the two
+   in sync on every keystroke, including scrollLeft. Both share one font
+   rule below so their glyph metrics can never drift apart. */
+.composer-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-input-wrap input,
+.composer-highlight {
+  font-family: var(--font-text);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
+  padding: 11px 4px;
   border: none;
-  border-radius: var(--radius);
-  font-weight: 500;
+  border-radius: 0;
+}
+
+.composer-input-wrap input {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+}
+.composer-input-wrap input:focus,
+.composer-input-wrap input:focus-visible {
+  outline: none;
+}
+
+.composer-input-wrap input::placeholder {
+  color: var(--ink-muted-48);
+  -webkit-text-fill-color: var(--ink-muted-48);
+}
+
+.composer-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  background: transparent;
+  color: var(--ink);
+}
+
+/* Color only -- never weight, size, or spacing here. Changing anything that
+   affects glyph width would make this span render wider/narrower than the
+   same (invisible) text underneath it in the real input, throwing the caret
+   out of sync with what's visually on screen. */
+.composer-highlight .cmd-token {
+  color: var(--primary);
+}
+
+.command-suggestions {
+  position: absolute;
+  left: 0;
+  right: 12px;
+  bottom: calc(100% + 20px);
+  z-index: 5;
+  background: var(--canvas-frosted);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.command-suggestion-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px var(--sp-md);
   cursor: pointer;
 }
 
-#stopBtn:hover {
-  background: #7A3F35;
+.command-suggestion-item .cmd {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--primary);
+  white-space: nowrap;
+}
+
+.command-suggestion-item .desc {
+  font-size: 14px;
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
+}
+
+.command-suggestion-item.active {
+  background: var(--parchment);
+}
+
+/* button-primary (Send) */
+.composer button {
+  flex: 0 0 auto;
+  padding: 11px 22px;
+  background: var(--primary);
+  color: var(--on-primary);
+  border: none;
+  border-radius: var(--r-pill);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.29;
+}
+.composer button:disabled {
+  background: var(--chip-translucent);
+  color: var(--ink-muted-48);
+  cursor: not-allowed;
+}
+
+/* Stop: dark pill, same shape as Send */
+#stopBtn {
+  background: var(--ink);
+  color: var(--body-on-dark);
+}
+
+.loading {
+  font-size: 14px;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--body-muted);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ---------- Responsive (hero type + spacing follow DESIGN.md breakpoints) ---------- */
+@media (max-width: 1068px) {
+  .welcome-greeting {
+    font-size: 40px;
+    line-height: 1.1;
+  }
 }
 
 @media (max-width: 720px) {
+  :root {
+    --gutter: 16px;
+  }
+  body.rail-collapsed {
+    --content-max: 10000px;
+  }
   .app,
   body.rail-collapsed .app {
     grid-template-columns: 1fr;
@@ -1260,6 +1459,7 @@ body.rail-collapsed .deck-header {
     flex-direction: row;
     overflow-x: auto;
     align-items: center;
+    padding: var(--sp-sm) var(--sp-md);
     opacity: 1;
     pointer-events: auto;
   }
@@ -1278,60 +1478,45 @@ body.rail-collapsed .deck-header {
   .rail-expand-tab {
     display: none !important;
   }
-  /* The floating composer's fixed 56px side margin (calc(100% - 56px))
-     and .thread/.tip-strip's 28px padding are sized for desktop breathing
-     room -- both eat too much of a narrow screen, so trim them here. */
+  body.rail-collapsed .deck-header {
+    padding-left: var(--gutter);
+  }
+  .dock {
+    bottom: var(--sp-md);
+  }
   .composer {
-    width: calc(100% - 24px);
-    padding-left: 16px;
+    padding-left: var(--sp-md);
   }
-  .thread,
-  .tip-strip {
-    padding-left: 16px;
-    padding-right: 16px;
+  .composer button {
+    padding: 11px 18px;
+  }
+  .card.flashcard-deck,
+  .card.quiz-deck {
+    max-width: 100%;
   }
 }
 
-/* ---------- Tip strip ----------
-   A thin, ghosted line that sits just above the composer and cycles
-   through a handful of feature tips once per browser, then quietly
-   collapses away -- not a persistent widget, just a brief orientation
-   pass for a first-time visitor. */
-.tip-strip {
-  padding: 0 28px;
-  max-height: 34px;
-  opacity: 1;
-  overflow: hidden;
-  background: var(--paper);
-  width: 100%;
-  max-width: var(--content-max-width);
-  margin: 0 auto;
-  transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
-}
-.tip-strip.done {
-  max-height: 0;
-  opacity: 0;
-  padding-top: 0;
-  padding-bottom: 0;
+@media (max-width: 640px) {
+  .welcome-greeting {
+    font-size: 34px;
+  }
 }
 
-.tip-strip-text {
-  display: inline-block;
-  padding: 8px 0;
-  font-size: 0.8rem;
-  font-style: italic;
-  color: var(--text-muted);
-  opacity: 0.6;
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-.tip-strip-text.swap {
-  opacity: 0;
-  transform: translateY(3px);
+@media (max-width: 419px) {
+  .welcome-greeting {
+    font-size: 28px;
+    line-height: 1.14;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .tip-strip,
-  .tip-strip-text {
+  .tip-strip-text,
+  .thread,
+  .dock,
+  .welcome,
+  .card {
     transition: none !important;
+    animation: none !important;
   }
 }

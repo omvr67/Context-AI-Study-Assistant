@@ -1160,7 +1160,7 @@ resetBtn.addEventListener("click", async () => {
     card.innerHTML = `<p class="recap-label">Before we reset — a quick recap:</p>${renderMarkdown(summary)}`;
     thread.appendChild(card);
   }
-  addCard("assistant", "Conversation reset. Ask me anything about your syllabi.");
+  // welcome.js re-inserts a fresh greeting once the thread is cleared.
 });
 
 // --- Add-a-syllabus panel: tab switching + both submit flows -------------

@@ -6,7 +6,7 @@
   <title>Context AI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
-    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Newsreader:ital,wght@1,500;1,600&family=Inter:wght@400;500&display=swap"
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Newsreader:ital,wght@1,600&family=Inter:wght@300;400;600;700&display=swap"
     rel="stylesheet"
   />
   <link rel="stylesheet" href="style.css" />
@@ -100,35 +100,28 @@
         <span class="tab notebook-scope hidden" id="notebookScopeTab"></span>
       </header>
 
-      <div class="thread" id="thread">
-        <div class="card assistant">
-          <p>
-            Hi — I'm grounded strictly in the syllabi on the left. Ask me about grading, exam
-            dates, attendance, GPA projections, or ask me to build you a study plan. Don't see
-            your course? Add its syllabus in the sidebar — paste the text or upload a PDF — and
-            I'll pick it up right away.
-          </p>
-        </div>
-      </div>
+      <div class="thread" id="thread"></div>
 
-      <div class="tip-strip" id="tipStrip" aria-live="polite">
-        <span class="tip-strip-text" id="tipStripText"></span>
-      </div>
-
-      <form class="composer" id="composer">
-        <div class="composer-input-wrap" id="composerInputWrap">
-          <div class="command-suggestions hidden" id="commandSuggestions"></div>
-          <div class="composer-highlight" id="composerHighlight" aria-hidden="true"></div>
-          <input
-            id="messageInput"
-            type="text"
-            placeholder="Ask about a policy, your GPA, or a study plan…"
-            autocomplete="off"
-          />
+      <div class="dock">
+        <div class="tip-strip" id="tipStrip" aria-live="polite">
+          <span class="tip-strip-text" id="tipStripText"></span>
         </div>
-        <button type="submit" id="sendBtn">Send</button>
-        <button type="button" id="stopBtn" class="hidden">Stop</button>
-      </form>
+
+        <form class="composer" id="composer">
+          <div class="composer-input-wrap" id="composerInputWrap">
+            <div class="command-suggestions hidden" id="commandSuggestions"></div>
+            <div class="composer-highlight" id="composerHighlight" aria-hidden="true"></div>
+            <input
+              id="messageInput"
+              type="text"
+              placeholder="Ask about a policy, your GPA, or a study plan…"
+              autocomplete="off"
+            />
+          </div>
+          <button type="submit" id="sendBtn">Send</button>
+          <button type="button" id="stopBtn" class="hidden">Stop</button>
+        </form>
+      </div>
     </main>
   </div>
 
@@ -151,5 +144,6 @@
   <script src="app.js"></script>
   <script src="sidebar.js"></script>
   <script src="tips.js"></script>
+  <script src="welcome.js"></script>
 </body>
 </html>
