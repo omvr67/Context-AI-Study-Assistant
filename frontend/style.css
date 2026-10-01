@@ -2,41 +2,60 @@
    Context AI -- frontend styles, built to DESIGN.md (Apple design system).
 
    Rules this file follows (see DESIGN.md):
-   - One accent: Action Blue (--primary). No second accent color anywhere.
-   - Surfaces: parchment canvas, white utility cards, pure-black nav rail,
+   - One interactive accent: Action Blue (--primary).
+   - Surfaces: parchment canvas, white utility cards, near-black nav rail,
      near-black tiles. The color change is the divider, not a border.
    - Radii: 8 (sm) / 11 (md) / 18 (lg) / pill. Nothing in between.
-   - No shadows and no gradients. "Floating" comes from an inset position,
-     a hairline, and frosted backdrop blur (the floating-sticky-bar recipe).
+   - No gradients. "Floating" comes from an inset position, a hairline, and
+     strong frosted backdrop blur (the floating-sticky-bar recipe).
    - Type ladder is 300 / 400 / 600 / 700 -- weight 500 is deliberately absent.
    - Buttons press with transform: scale(0.95). Hover states aren't defined.
-   - Single documented exception: the wordmark + welcome greeting share the
-     brand italic (Newsreader), by explicit request.
+
+   Documented exceptions, all by explicit request:
+   - Type: titles use the brand italic (Newsreader 600 italic, the wordmark's
+     face) everywhere; subtitles in menus use Newsreader upright. Body, UI
+     and chat text stay on the sans stack; mono is for code only.
+   - Palette: the old warm palette survives as tints -- cream parchment, warm
+     near-black, warm hairlines/muted text, and one small tan accent
+     (--accent-warm) used for decoration only. Blue stays the only color that
+     means "clickable".
+   - Shadow: the chatbox gets one soft shadow while it has focus (no outline).
+   - No emoji anywhere in the UI. Icons are inline SVG and used sparingly.
    ========================================================================== */
 
 :root {
   /* colors */
-  --primary: #0066cc;
-  --primary-focus: #0071e3;
-  --primary-on-dark: #2997ff;
+  --primary: #3D2E28;
+  --primary-focus: #E2A76F;
+  --primary-on-dark: #E2A76F;
   --on-primary: #ffffff;
-  --ink: #1d1d1f;
+  --ink: #15130f; /* old palette: warm near-black */
   --body-on-dark: #ffffff;
-  --body-muted: #cccccc;
-  --ink-muted-80: #333333;
-  --ink-muted-48: #7a7a7a;
-  --divider-soft: #f0f0f0;
-  --hairline: #e0e0e0;
-  --hairline-soft: rgba(0, 0, 0, 0.08);
+  --body-muted: #cfc9b8;
+  --ink-muted-80: #38352c;
+  --ink-muted-48: #6e6858; /* old --text-muted */
+  --divider-soft: #f0ebdd;
+  --hairline: #ddd5be; /* old --border */
+  --hairline-soft: rgba(21, 19, 15, 0.08);
   --canvas: #ffffff;
-  --parchment: #f5f5f7;
-  --pearl: #fafafc;
-  --tile-1: #272729;
-  --tile-2: #2a2a2c;
-  --black: #000000;
-  --chip-translucent: rgba(210, 210, 215, 0.64);
-  --canvas-frosted: rgba(255, 255, 255, 0.8);
-  --parchment-frosted: rgba(245, 245, 247, 0.8);
+  --parchment: #f7f4ec; /* old --paper */
+  --pearl: #fbf9f3;
+  --tile-1: #26231c;
+  --tile-2: #2a271f;
+  --black: #15130f; /* old --rail */
+  --accent-warm: #a68a5b; /* old --accent-warm: decoration only, never clickable */
+  --accent-warm-deep: #85693a; /* same hue, dark enough for text on cream/white (4.7:1) */
+  --chip-translucent: rgba(221, 213, 190, 0.64);
+  /* Frosted glass: low-alpha fill + heavy blur/saturation + a bright edge.
+     The thread scrolls underneath the header, dock and suggestion menu, so the
+     blur is actually visible. */
+  --canvas-frosted: rgba(255, 255, 255, 0.56);
+  --canvas-frosted-strong: rgba(255, 255, 255, 0.74); /* popover menus: text behind must stay calm */
+  --parchment-frosted: rgba(247, 244, 236, 0.5);
+  --glass-filter: saturate(220%) blur(40px);
+  --glass-edge: rgba(255, 255, 255, 0.7);
+  --glass-ring: rgba(21, 19, 15, 0.07);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 
   /* radii */
   --r-sm: 8px;
@@ -55,7 +74,8 @@
   /* type */
   --font-text: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
   --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
-  --font-brand: "Newsreader", Georgia, serif; /* logo + welcome greeting */
+  --font-brand: "Newsreader", Georgia, serif; /* titles: wordmark, headings (600 italic) */
+  --font-sub: "Newsreader", Georgia, serif; /* menu subtitles: same family, upright 400 */
   --font-mono: "IBM Plex Mono", ui-monospace, monospace; /* code only */
 
   /* layout */
@@ -89,6 +109,10 @@ body {
   line-height: 1.47;
   letter-spacing: -0.374px;
   -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(166, 138, 91, 0.3);
 }
 
 button,
@@ -224,20 +248,33 @@ body.rail-collapsed .deck-header {
 }
 
 .rail-caption {
-  font-size: 12px;
+  font-family: var(--font-sub);
+  font-size: 13px;
   line-height: 1.4;
-  letter-spacing: -0.12px;
+  letter-spacing: 0;
   color: var(--body-muted);
   margin: 0;
 }
 
 .rail-section-heading {
-  margin-top: var(--sp-xs);
-  font-size: 14px;
+  margin: var(--sp-xs) 0 0;
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 19px;
   font-weight: 600;
-  line-height: 1.29;
-  letter-spacing: -0.224px;
+  line-height: 1.2;
+  letter-spacing: -0.12px;
   color: var(--body-on-dark);
+}
+.rail-section-sub {
+  display: block;
+  font-family: var(--font-sub);
+  font-style: normal;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+  color: var(--body-muted);
 }
 
 .course-list {
@@ -279,18 +316,21 @@ body.rail-collapsed .deck-header {
 
 .course-chip-main .code {
   display: block;
-  font-size: 14px;
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 17px;
   font-weight: 600;
-  line-height: 1.29;
-  letter-spacing: -0.224px;
-  color: var(--body-on-dark);
+  line-height: 1.2;
+  letter-spacing: -0.12px;
+  color: var(--accent-warm); /* old palette: course codes in tan */
 }
 
 .course-chip-main .name {
   display: block;
-  font-size: 12px;
+  font-family: var(--font-sub);
+  font-size: 13px;
   line-height: 1.3;
-  letter-spacing: -0.12px;
+  letter-spacing: 0;
   color: var(--body-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -313,6 +353,16 @@ body.rail-collapsed .deck-header {
 
 .course-chip-delete {
   font-size: 17px;
+}
+
+.course-chip-solutions svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .course-chip-solutions.attached {
@@ -484,7 +534,7 @@ body.rail-collapsed .deck-header {
 /* button-dark-utility: the nav-bar utility button */
 .reset-btn {
   margin-top: auto;
-  background: var(--ink);
+  background: var(--tile-1); /* --ink now matches the rail, so use the tile tone */
   border: none;
   color: var(--body-on-dark);
   padding: 8px 15px;
@@ -504,28 +554,34 @@ body.rail-collapsed .deck-header {
   background: var(--parchment);
 }
 
-/* sub-nav-frosted: parchment @ 80% + blur, 52px, hairline separator */
+/* sub-nav-frosted: translucent parchment + heavy blur, 52px. Overlays the top
+   of the thread (which pads for it) so the glass has content to blur. */
 .deck-header {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   height: 52px;
   padding: 0 var(--gutter);
   display: flex;
   align-items: center;
   gap: var(--sp-sm);
   background: var(--parchment-frosted);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
-  border-bottom: 1px solid var(--hairline-soft);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border-bottom: 1px solid var(--glass-ring);
+  box-shadow: inset 0 -1px 0 var(--glass-edge);
   z-index: 20;
 }
 
 .tab {
   min-width: 0;
-  font-family: var(--font-display);
-  font-size: 21px;
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 26px;
   font-weight: 600;
   line-height: 1.19;
-  letter-spacing: 0.231px;
+  letter-spacing: -0.28px;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -536,6 +592,7 @@ body.rail-collapsed .deck-header {
 .tab.notebook-scope {
   flex: 0 0 auto;
   font-family: var(--font-text);
+  font-style: normal;
   font-size: 14px;
   font-weight: 400;
   line-height: 1.29;
@@ -561,7 +618,7 @@ body.rail-collapsed .deck-header {
   display: flex;
   flex-direction: column;
   gap: var(--sp-sm);
-  padding: var(--sp-lg) var(--pad-x) 168px;
+  padding: calc(52px + var(--sp-lg)) var(--pad-x) 168px; /* 52px = overlaid glass header */
   background: var(--parchment);
   transition: padding-left 0.18s ease, padding-right 0.18s ease;
 }
@@ -592,6 +649,10 @@ body.rail-collapsed .deck-header {
 .welcome-sub {
   margin: 0;
   max-width: 52ch;
+  font-family: var(--font-sub);
+  font-size: 19px;
+  line-height: 1.45;
+  letter-spacing: 0;
   color: var(--ink-muted-80);
 }
 
@@ -653,7 +714,11 @@ body.rail-collapsed .deck-header {
 
 .recap-label {
   margin: 0 0 var(--sp-xxs);
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.12px;
   color: var(--ink);
 }
 
@@ -727,7 +792,7 @@ body.rail-collapsed .deck-header {
 .card.recap blockquote {
   margin: 0.6em 0;
   padding: 1px 0 1px 12px;
-  border-left: 2px solid var(--hairline);
+  border-left: 2px solid var(--accent-warm);
   color: var(--ink-muted-80);
 }
 
@@ -855,7 +920,11 @@ body.rail-collapsed .deck-header {
   color: var(--ink-muted-80);
 }
 .flashcard-header .title {
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.12px;
   color: var(--ink);
 }
 
@@ -932,7 +1001,11 @@ body.rail-collapsed .deck-header {
   color: var(--ink-muted-80);
 }
 .quiz-header .title {
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.12px;
   color: var(--ink);
 }
 
@@ -977,7 +1050,7 @@ body.rail-collapsed .deck-header {
 .quiz-option .letter {
   flex: 0 0 auto;
   font-weight: 600;
-  color: var(--ink-muted-48);
+  color: var(--accent-warm-deep);
 }
 .card.quiz-deck .quiz-question p,
 .card.quiz-deck .quiz-option p,
@@ -1112,6 +1185,18 @@ body.rail-collapsed .deck-header {
 }
 .quiz-summary-list .mark {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 1.43em;
+}
+.quiz-summary-list .mark svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .quiz-summary-list .mark.correct {
   color: var(--primary);
@@ -1241,13 +1326,15 @@ body.rail-collapsed .deck-header {
   pointer-events: auto;
 }
 
-/* Tip strip: a ghosted one-line chip above the composer that cycles once
-   through the tips (see tips.js), then collapses away. */
+/* Tip strip: plain text above the chatbox -- no chip, border or fill. Same
+   look the old design had (small italic, muted, ghosted); cycles once through
+   the tips (see tips.js), then collapses away. The parchment halo keeps it
+   legible when chat content scrolls underneath without drawing a box. */
 .tip-strip {
   align-self: flex-start;
   max-width: 100%;
-  max-height: 44px;
-  margin-bottom: var(--sp-xs);
+  max-height: 34px;
+  margin-bottom: var(--sp-xxs);
   opacity: 1;
   overflow: hidden;
   transition: max-height 0.4s ease, opacity 0.4s ease, margin 0.4s ease;
@@ -1260,15 +1347,14 @@ body.rail-collapsed .deck-header {
 
 .tip-strip-text {
   display: inline-block;
-  padding: 6px 14px;
-  font-size: 14px;
-  line-height: 1.29;
-  letter-spacing: -0.224px;
+  padding: 6px var(--sp-lg); /* left edge lines up with the chatbox text */
+  font-size: 0.8rem;
+  font-style: italic;
+  line-height: 1.4;
+  letter-spacing: -0.12px;
   color: var(--ink-muted-48);
-  background: var(--canvas-frosted);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
-  border-radius: var(--r-pill);
+  opacity: 0.6;
+  text-shadow: 0 0 8px var(--parchment), 0 0 16px var(--parchment);
   transition: opacity 0.3s ease, transform 0.3s ease;
 }
 .tip-strip-text.swap {
@@ -1276,23 +1362,48 @@ body.rail-collapsed .deck-header {
   transform: translateY(3px);
 }
 
-/* Composer: search-input grammar (pill, hairline) on the frosted-bar recipe */
+/* Keep the tip out of the way while the slash-command menu is open, so it
+   doesn't show through the glass. */
+.dock:has(.command-suggestions:not(.hidden)) .tip-strip {
+  opacity: 0;
+}
+
+/* Composer: search-input grammar (pill) on the frosted-bar recipe.
+   The glass lives on ::before rather than on .composer itself: an element with
+   backdrop-filter becomes a "backdrop root", which would stop the slash-command
+   menu (a child of the composer) from blurring the chat behind it. */
 .composer {
+  position: relative;
+  isolation: isolate;
   display: flex;
   align-items: center;
   gap: var(--sp-xs);
   min-height: 60px;
   padding: var(--sp-xs) var(--sp-xs) var(--sp-xs) var(--sp-lg);
-  background: var(--canvas-frosted);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
-  border: 1px solid var(--hairline-soft);
   border-radius: var(--r-pill);
 }
 
+.composer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--canvas-frosted);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-highlight), 0 0 0 1px var(--glass-ring);
+  transition: box-shadow 0.2s ease;
+  pointer-events: none;
+}
+
+/* Typing state: one soft shadow instead of a focus ring. */
 .composer:focus-within {
-  outline: 2px solid var(--primary-focus);
-  outline-offset: 0;
+  outline: none;
+}
+.composer:focus-within::before {
+  box-shadow: var(--glass-highlight), 0 0 0 1px var(--glass-ring), 0 8px 28px rgba(21, 19, 15, 0.14);
 }
 
 /* Slash-command highlight overlay + suggestion palette.
@@ -1364,11 +1475,12 @@ body.rail-collapsed .deck-header {
   right: 12px;
   bottom: calc(100% + 20px);
   z-index: 5;
-  background: var(--canvas-frosted);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
-  border: 1px solid var(--hairline);
+  background: var(--canvas-frosted-strong);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-edge);
   border-radius: var(--r-lg);
+  box-shadow: var(--glass-highlight), 0 0 0 1px var(--glass-ring);
   overflow: hidden;
 }
 
@@ -1381,18 +1493,21 @@ body.rail-collapsed .deck-header {
 }
 
 .command-suggestion-item .cmd {
-  font-size: 14px;
+  font-family: var(--font-brand);
+  font-style: italic;
+  font-size: 16px;
   font-weight: 600;
   line-height: 1.29;
-  letter-spacing: -0.224px;
+  letter-spacing: -0.12px;
   color: var(--primary);
   white-space: nowrap;
 }
 
 .command-suggestion-item .desc {
+  font-family: var(--font-sub);
   font-size: 14px;
   line-height: 1.29;
-  letter-spacing: -0.224px;
+  letter-spacing: 0;
   color: var(--ink-muted-80);
 }
 

@@ -84,12 +84,12 @@ const THINKING_PHRASES = [
 ];
 
 const TOOL_LABELS = {
-  search_syllabus: "📖 Searched syllabus",
-  search_notebook: "📓 Searched notebook",
-  gpa_impact_simulator: "🧮 Calculated GPA",
-  gpa_target_planner: "🎯 Planned target GPA",
-  generate_study_schedule: "🗓️ Built a schedule",
-  build_ai_study_plan: "🗓️ Auto-built study plan",
+  search_syllabus: "Searched syllabus",
+  search_notebook: "Searched notebook",
+  gpa_impact_simulator: "Calculated GPA",
+  gpa_target_planner: "Planned target GPA",
+  generate_study_schedule: "Built a schedule",
+  build_ai_study_plan: "Auto-built study plan",
 };
 
 // Real markdown rendering (headings, lists, code blocks, tables, quotes,
@@ -221,7 +221,7 @@ function finalizeStreamingCard(card, data) {
   if (data.grounded) {
     const badge = document.createElement("span");
     badge.className = "badge grounded";
-    badge.textContent = "✓ Grounded in syllabus";
+    badge.textContent = "Grounded in syllabus";
     meta.appendChild(badge);
   }
 
@@ -261,9 +261,14 @@ function finalizeStreamingCard(card, data) {
 }
 
 const MODE_LABELS = {
-  exam: "📝 Exam Mode",
-  depth: "🧠 Deep Explainer",
+  exam: "Exam Mode",
+  depth: "Deep Explainer",
 };
+
+// Small inline icons for the solutions button (stroke = currentColor, sized in CSS).
+const ICON_KEY = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l9-9M16 7l3 3M14 9l2 2"></path></svg>';
+const ICON_X = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="5 12 10 17 19 7"></polyline></svg>';
 
 // --- Solutions PDF attach: shared helper used by both course chips and
 // notebook chips (see backend's POST /courses/{code}/solutions and
@@ -276,10 +281,9 @@ function addSolutionsButton(chip, { hasSolutions, label, uploadFn, onDone }) {
   btn.className = "course-chip-solutions" + (hasSolutions ? " attached" : "");
   btn.title = hasSolutions ? `Replace the solutions PDF for ${label}` : `Attach a solutions PDF for ${label}`;
   // Icon-only: this sits in a fixed-width slot next to the delete button
-  // (see .course-chip-solutions in style.css) -- the old "🔑 Add solutions"
-  // text label crowded that slot, so the tooltip above carries the label
-  // instead.
-  btn.textContent = hasSolutions ? "✓" : "🔑";
+  // (see .course-chip-solutions in style.css) -- a text label crowded that
+  // slot, so the tooltip above carries the label instead.
+  btn.innerHTML = hasSolutions ? ICON_CHECK : ICON_KEY;
 
   const fileInput = document.createElement("input");
   fileInput.type = "file";
@@ -288,7 +292,7 @@ function addSolutionsButton(chip, { hasSolutions, label, uploadFn, onDone }) {
 
   const resetLabel = () => {
     btn.disabled = false;
-    btn.textContent = hasSolutions ? "✓" : "🔑";
+    btn.innerHTML = hasSolutions ? ICON_CHECK : ICON_KEY;
   };
 
   fileInput.addEventListener("change", async () => {
@@ -408,7 +412,7 @@ async function loadCourses() {
 // search_notebook always searches the whole notebook), with every entry
 // deletable since none of them are built-in.
 
-// Updates the small "📓 N PDF(s) only" pill in the deck header to reflect
+// Updates the small "N PDF(s) only" pill in the deck header to reflect
 // selectedNotebookDocIds -- purely a display of that Set, never a source
 // of truth itself.
 function updateNotebookScopeTab() {
@@ -418,7 +422,7 @@ function updateNotebookScopeTab() {
     notebookScopeTab.textContent = "";
     return;
   }
-  notebookScopeTab.textContent = `📓 ${n} PDF${n === 1 ? "" : "s"} only`;
+  notebookScopeTab.textContent = `${n} PDF${n === 1 ? "" : "s"} only`;
   notebookScopeTab.classList.remove("hidden");
 }
 
@@ -437,7 +441,7 @@ function renderNotebookChip(doc) {
   main.title = selectedNotebookDocIds.has(doc.doc_id)
     ? `Pinned for this chat -- click to unpin "${doc.title}"`
     : `Click to pin "${doc.title}" as the only source for this chat`;
-  main.innerHTML = `<span class="code">📓 ${doc.page_count} page${doc.page_count === 1 ? "" : "s"}</span><span class="name">${doc.title}</span>`;
+  main.innerHTML = `<span class="code">${doc.page_count} page${doc.page_count === 1 ? "" : "s"}</span><span class="name">${doc.title}</span>`;
   main.addEventListener("click", () => {
     if (selectedNotebookDocIds.has(doc.doc_id)) {
       selectedNotebookDocIds.delete(doc.doc_id);
@@ -801,7 +805,7 @@ function addFlashcardDeckCard(deck) {
 
   const header = document.createElement("div");
   header.className = "flashcard-header";
-  header.innerHTML = `<span class="title">🗂️ ${deck.title}</span><span>${deck.cards.length} cards</span>`;
+  header.innerHTML = `<span class="title">${deck.title}</span><span>${deck.cards.length} cards</span>`;
   card.appendChild(header);
 
   const face = document.createElement("div");
@@ -903,8 +907,7 @@ function addQuizCard(deck) {
 
   const header = document.createElement("div");
   header.className = "quiz-header";
-  const icon = deck.source === "retry" ? "🔁" : "📝";
-  header.innerHTML = `<span class="title">${icon} ${escapeHtml(deck.title)}</span><span>${deck.questions.length} questions</span>`;
+  header.innerHTML = `<span class="title">${escapeHtml(deck.title)}</span><span>${deck.questions.length} questions</span>`;
   card.appendChild(header);
 
   const body = document.createElement("div");
@@ -944,7 +947,7 @@ function addQuizCard(deck) {
     finishBtn.disabled = done < total;
     finishBtn.textContent = done < total
       ? `Answer all questions to finish (${done}/${total})`
-      : "Finish quiz ✓";
+      : "Finish quiz";
   }
 
   function renderQuestion() {
@@ -1002,7 +1005,7 @@ function addQuizCard(deck) {
     let html = `<div class="quiz-summary"><div class="score">${score} / ${total}</div><div class="score-detail">correct</div><ul class="quiz-summary-list">`;
     deck.questions.forEach((q, i) => {
       const correct = answers[i].chosen_index === q.correct_index;
-      const mark = correct ? `<span class="mark correct">✓</span>` : `<span class="mark wrong">✗</span>`;
+      const mark = correct ? `<span class="mark correct">${ICON_CHECK}</span>` : `<span class="mark wrong">${ICON_X}</span>`;
       html += `<li>${mark}<span>${escapeHtml(q.question)}</span></li>`;
     });
     html += `</ul>`;
