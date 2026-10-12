@@ -34,6 +34,16 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # --- Model ------------------------------------------------------------------
 # Previously hardcoded in main.py. Overriding this is mainly useful for a
 # cheaper/faster fallback during local testing; the production demo should
@@ -64,3 +74,63 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip() or None
 # CORS at all for the shipped frontend -- this only matters for a request
 # made from a *different* origin (a second tool, a manual fetch, etc.).
 ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", ["*"])
+
+# --- Rate limiting ---------------------------------------------------------
+# See backend/rate_limit.py. RATE_LIMIT_PER_MINUTE is the existing default,
+# now configurable; RATE_LIMIT_PER_DAY is new -- a per-visitor ceiling for a
+# long demo day, well above what a real student session would ever need,
+# meant to catch a bot or a forgotten open tab rather than a person.
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 15)
+RATE_LIMIT_PER_DAY = _env_int("RATE_LIMIT_PER_DAY", 300)
+
+# --- Input / resource caps --------------------------------------------------
+# A generous ceiling for one chat message -- comfortably more than a real
+# question needs, but bounds how much a single turn can grow the prompt
+# sent to Groq.
+MAX_MESSAGE_LENGTH = _env_int("MAX_MESSAGE_LENGTH", 4000)
+
+# How many of a session's most recent turns (one turn = one student message
+# through the assistant's reply, tool calls included) stay in the prompt
+# sent to the model. Bounds a long-running session's token usage and
+# latency instead of resending the entire conversation forever -- see
+# agent.py's _history(), which is the only place this is read. A "turn" is
+# never split mid tool-call/tool-response pair; see that method's docstring
+# for why that matters.
+HISTORY_WINDOW_TURNS = _env_int("HISTORY_WINDOW_TURNS", 20)
+
+# Per-device cap on the private notebook (see notebook_store.py) -- a demo
+# visitor's browser, not a real account, so these exist to keep one device
+# from growing the shared notebook_docs.json file without bound rather than
+# to model a real product quota.
+NOTEBOOK_MAX_DOCS = _env_int("NOTEBOOK_MAX_DOCS", 5)
+NOTEBOOK_MAX_MB = _env_int("NOTEBOOK_MAX_MB", 50)
+
+# --- Data lifecycle ---------------------------------------------------------
+# Visitor data -- chat sessions (and the quiz history tied to them) and
+# notebook uploads -- is swept away after this many hours of inactivity,
+# by a background task started in main.py (see its lifespan handler), not
+# a real cron job, since this is a single demo process. Not gated behind
+# DEMO_MODE: an idle local-dev session is presumably abandoned too, so
+# there's no reason to only bound memory/disk growth in demo mode.
+DATA_TTL_HOURS = _env_int("DATA_TTL_HOURS", 24)
+
+# --- Resilience --------------------------------------------------------
+# Bounds how long the backend waits on a single Groq HTTP request (set on
+# the ChatGroq client itself, see main.py) -- a stalled connection can't
+# hang a worker thread forever.
+LLM_CALL_TIMEOUT_SECONDS = _env_int("LLM_CALL_TIMEOUT_SECONDS", 30)
+
+# How many Groq calls -- chat, flashcards, quiz, all of them -- are
+# allowed to run at once, across every visitor combined (see
+# agent.py's _invoke_with_backoff / _stream_with_backoff, the two choke
+# points every Groq call in this codebase actually goes through). Past
+# this, a new call waits up to LLM_QUEUE_WAIT_SECONDS for a free slot
+# before giving up with a friendly "busy" message instead of piling up
+# indefinitely -- degrading politely under load rather than falling over.
+MAX_CONCURRENT_LLM_CALLS = _env_int("MAX_CONCURRENT_LLM_CALLS", 5)
+LLM_QUEUE_WAIT_SECONDS = _env_int("LLM_QUEUE_WAIT_SECONDS", 10)
+
+# --- Logging -------------------------------------------------------------
+# Plain text to stdout (see main.py's logging.basicConfig call) -- no file
+# rotation, no JSON formatter; this is a single demo process, not a fleet.
+LOG_LEVEL = (os.environ.get("LOG_LEVEL", "INFO").strip().upper()) or "INFO"

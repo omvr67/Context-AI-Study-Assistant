@@ -99,12 +99,35 @@ from free-form chat.
     similar questions" half of the original request. Returns None (main.py
     turns this into a 422) when the session has no quiz history yet, or
     hasn't missed anything so far.
+
+v1.4: _history() now trims each session down to its last
+HISTORY_WINDOW_TURNS turns (see backend/config.py) before returning it,
+so a long-running demo session's token usage and latency stay bounded
+instead of resending the entire conversation forever. See
+_trim_history()'s own docstring for why the cut is always exactly on a
+HumanMessage boundary. Also added evict_expired_sessions(), called by
+main.py's background DATA_TTL_HOURS sweep to clear sessions idle longer
+than the configured TTL.
+
+Resilience (also v1.4): _invoke_with_backoff and _stream_with_backoff --
+the only two places any Groq call in this codebase is actually made --
+now hold a process-wide semaphore (MAX_CONCURRENT_LLM_CALLS) for the
+duration of the call, raising LLMBusyError if no slot frees up within
+LLM_QUEUE_WAIT_SECONDS; chat() and chat_stream() turn that into
+BUSY_MESSAGE the same way they already turn a 429 into
+FRIENDLY_QUOTA_MESSAGE (main.py's /flashcards, /quiz, and /retry-quiz do
+the same, as a 503). The per-request network timeout itself
+(LLM_CALL_TIMEOUT_SECONDS) is set once, on the ChatGroq client in
+main.py, not here. llm_calls_in_flight() exposes the live count for
+GET /health.
 """
 import re
+import threading
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from .config import HISTORY_WINDOW_TURNS, LLM_QUEUE_WAIT_SECONDS, MAX_CONCURRENT_LLM_CALLS
 from .models import GeneratedTopicFlashcards, GeneratedTopicQuiz
 
 GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant -- a sharp, encouraging
@@ -194,6 +217,58 @@ FRIENDLY_QUOTA_MESSAGE = (
     "We've hit the shared AI quota for a moment -- please wait a few seconds and try again."
 )
 
+BUSY_MESSAGE = (
+    "The assistant is handling a lot of requests right now -- please wait a moment and try again."
+)
+
+
+class LLMBusyError(Exception):
+    """Raised by _invoke_with_backoff/_stream_with_backoff when
+    MAX_CONCURRENT_LLM_CALLS requests are already in flight and this one
+    couldn't get a slot within LLM_QUEUE_WAIT_SECONDS (see
+    backend/config.py). Callers catch this specifically to surface
+    BUSY_MESSAGE instead of a raw exception string -- see chat(),
+    chat_stream(), and main.py's /flashcards, /quiz, /retry-quiz.
+    """
+
+
+# Bounds how many Groq calls run at once across every visitor combined --
+# see _invoke_with_backoff/_stream_with_backoff below, the two choke
+# points every Groq call in this codebase goes through (chat's tool loop,
+# chat_stream's tool loop, summarize(), and the flashcards/quiz/retry-quiz
+# structured-output calls all route through one or the other). A
+# threading.Semaphore, not asyncio: FastAPI runs these synchronous route
+# handlers in a thread pool, so "in flight" means "running in a thread",
+# not "scheduled on an event loop".
+_llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+
+# An explicit counter, not Semaphore._value (an undocumented CPython
+# implementation detail) -- tracked the same way the semaphore itself is
+# acquired/released, so GET /health can report real-time load
+# (llm_calls_in_flight() below) without depending on internals.
+_in_flight_lock = threading.Lock()
+_in_flight_count = 0
+
+
+def llm_calls_in_flight() -> int:
+    """How many Groq calls are in flight, process-wide, right now. Read by
+    GET /health in main.py for operational visibility during a live demo.
+    """
+    with _in_flight_lock:
+        return _in_flight_count
+
+
+def _track_call_start() -> None:
+    global _in_flight_count
+    with _in_flight_lock:
+        _in_flight_count += 1
+
+
+def _track_call_end() -> None:
+    global _in_flight_count
+    with _in_flight_lock:
+        _in_flight_count -= 1
+
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Detects a 429 from Groq without depending on the exact exception
@@ -217,17 +292,28 @@ def _invoke_with_backoff(invoke_fn, messages, max_retries: int = _MAX_RETRIES, b
     429s -- anything else (bad request, auth failure, etc.) fails
     immediately since retrying those just burns time for no benefit.
     Backoff schedule: base_delay, base_delay*2, base_delay*4, ...
+
+    Holds _llm_semaphore for the entire call, retries included -- raises
+    LLMBusyError up front, before ever calling invoke_fn, if no slot
+    frees up within LLM_QUEUE_WAIT_SECONDS.
     """
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            return invoke_fn(messages)
-        except Exception as e:
-            last_exc = e
-            if not _is_rate_limit_error(e) or attempt == max_retries:
-                raise
-            time.sleep(base_delay * (2 ** attempt))
-    raise last_exc  # pragma: no cover -- loop above always returns or raises
+    if not _llm_semaphore.acquire(timeout=LLM_QUEUE_WAIT_SECONDS):
+        raise LLMBusyError(BUSY_MESSAGE)
+    _track_call_start()
+    try:
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return invoke_fn(messages)
+            except Exception as e:
+                last_exc = e
+                if not _is_rate_limit_error(e) or attempt == max_retries:
+                    raise
+                time.sleep(base_delay * (2 ** attempt))
+        raise last_exc  # pragma: no cover -- loop above always returns or raises
+    finally:
+        _track_call_end()
+        _llm_semaphore.release()
 
 
 def _stream_with_backoff(stream_fn, messages, max_retries: int = _MAX_RETRIES, base_delay: float = _BASE_DELAY_SECONDS):
@@ -236,20 +322,34 @@ def _stream_with_backoff(stream_fn, messages, max_retries: int = _MAX_RETRIES, b
     one token has reached the caller, retrying would mean re-sending
     duplicate output, so any error after that point is left to propagate
     instead of silently duplicating partial output.
+
+    Holds _llm_semaphore for as long as the caller is actually iterating
+    this generator (acquired on the first `next()`, released once
+    exhausted, returned early, or garbage-collected -- normal Python
+    generator/finally semantics), same accounting as
+    _invoke_with_backoff. Raises LLMBusyError up front if no slot frees
+    up within LLM_QUEUE_WAIT_SECONDS.
     """
-    attempt = 0
-    while True:
-        got_any = False
-        try:
-            for chunk in stream_fn(messages):
-                got_any = True
-                yield chunk
-            return
-        except Exception as e:
-            if got_any or not _is_rate_limit_error(e) or attempt == max_retries:
-                raise
-            time.sleep(base_delay * (2 ** attempt))
-            attempt += 1
+    if not _llm_semaphore.acquire(timeout=LLM_QUEUE_WAIT_SECONDS):
+        raise LLMBusyError(BUSY_MESSAGE)
+    _track_call_start()
+    try:
+        attempt = 0
+        while True:
+            got_any = False
+            try:
+                for chunk in stream_fn(messages):
+                    got_any = True
+                    yield chunk
+                return
+            except Exception as e:
+                if got_any or not _is_rate_limit_error(e) or attempt == max_retries:
+                    raise
+                time.sleep(base_delay * (2 ** attempt))
+                attempt += 1
+    finally:
+        _track_call_end()
+        _llm_semaphore.release()
 
 
 def _intent_hint(user_input: str) -> str | None:
@@ -323,10 +423,52 @@ class SyllabusAssistantAgent:
         # make sense.
         self._quiz_attempts: dict[str, list[dict]] = {}
 
+        # v1.4: last-touched time per session_id, for evict_expired_sessions()
+        # below. Updated in _history() -- the one call both chat() and
+        # chat_stream() make before anything else -- so "last active" means
+        # exactly what it says regardless of which entry point was used.
+        self._session_last_active: dict[str, float] = {}
+
     def _history(self, session_id: str) -> list:
         if session_id not in self._sessions:
             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
-        return self._sessions[session_id]
+        self._session_last_active[session_id] = time.time()
+        history = self._sessions[session_id]
+        self._trim_history(history)
+        return history
+
+    @staticmethod
+    def _trim_history(history: list) -> None:
+        """Keeps the system message plus at most the last HISTORY_WINDOW_TURNS
+        turns, mutating `history` in place (so this works whether the
+        caller holds the same list reference as self._sessions[session_id]
+        or looked it up independently).
+
+        A "turn" here is one HumanMessage through to just before the next
+        one (or the end of history) -- everything the student's message
+        triggered, tool calls included. The cut always lands exactly on a
+        HumanMessage boundary, never in the middle of an
+        AIMessage(tool_calls=...) -> ToolMessage sequence, because Groq's
+        (and every OpenAI-style) API requires every tool call to be
+        immediately followed by its matching tool response -- trimming
+        mid-sequence would send a malformed history and the next call
+        would fail outright.
+
+        Called from _history() itself (the only place both chat() and
+        chat_stream() fetch a session's history), so trimming happens once
+        per turn, before that turn's own messages are appended -- which
+        means history can transiently hold one turn more than the window
+        while the current turn is still being processed. That's fine: the
+        goal is bounding long-run growth across many turns, not enforcing
+        a hard ceiling mid-turn.
+        """
+        if HISTORY_WINDOW_TURNS <= 0 or not history:
+            return
+        human_indices = [i for i, m in enumerate(history) if isinstance(m, HumanMessage)]
+        if len(human_indices) <= HISTORY_WINDOW_TURNS:
+            return
+        cut_at = human_indices[-HISTORY_WINDOW_TURNS]
+        history[:] = [history[0]] + history[cut_at:]
 
     def _tools_for_call(self, extra_tools, exclude_tool_names: set[str] | None = None):
         """Resolves the (bound-LLM, tools_map) pair to use for one call.
@@ -370,6 +512,22 @@ class SyllabusAssistantAgent:
         """Clears a session's memory; the next turn starts a fresh SystemMessage."""
         self._sessions.pop(session_id, None)
         self._quiz_attempts.pop(session_id, None)
+        self._session_last_active.pop(session_id, None)
+
+    def evict_expired_sessions(self, ttl_seconds: float) -> int:
+        """Clears every session idle for longer than ttl_seconds -- chat
+        history and quiz history together, via reset() above, so the two
+        never drift out of sync. Called from main.py's background sweep
+        (DATA_TTL_HOURS, see backend/config.py); returns how many
+        sessions were evicted, purely so the sweep has something to log.
+        """
+        if ttl_seconds <= 0:
+            return 0
+        cutoff = time.time() - ttl_seconds
+        expired = [sid for sid, last in self._session_last_active.items() if last < cutoff]
+        for sid in expired:
+            self.reset(sid)
+        return len(expired)
 
     def recent_transcript(self, session_id: str, max_chars: int = 4000) -> str:
         """Plain "Student: .../Assistant: ..." transcript of a session's
@@ -644,6 +802,8 @@ class SyllabusAssistantAgent:
             call_messages = self._with_ephemeral(history, [mode_prompt, extra_system_prompt])
             try:
                 ai_msg: AIMessage = _invoke_with_backoff(llm_with_tools.invoke, call_messages)
+            except LLMBusyError:
+                return {"content": BUSY_MESSAGE, "sources": [], "tools_used": [], "mode": mode_key or None}
             except Exception as e:
                 content = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Sorry, I hit an error talking to the model: {e}"
                 return {
@@ -745,6 +905,9 @@ class SyllabusAssistantAgent:
                         is_tool_turn = bool(getattr(chunk, "tool_call_chunks", None))
                     if not is_tool_turn and chunk.content:
                         yield {"type": "token", "text": chunk.content}
+            except LLMBusyError:
+                yield {"type": "error", "error": BUSY_MESSAGE}
+                return
             except Exception as e:
                 error_msg = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Sorry, I hit an error talking to the model: {e}"
                 yield {"type": "error", "error": error_msg}

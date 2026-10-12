@@ -4,7 +4,7 @@ index 35d6207..c5ee6f6 100644
 +++ b/.env.example
 @@ -42,3 +42,6 @@ GROQ_API_KEY="your_groq_api_key_here"
  # LLM_CALL_TIMEOUT_SECONDS="30"   # per Groq HTTP request
- # MAX_CONCURRENT_LLM_CALLS="6"    # across every visitor combined
+ # MAX_CONCURRENT_LLM_CALLS="5"    # across every visitor combined
  # LLM_QUEUE_WAIT_SECONDS="10"     # how long a call waits for a free slot
 +
 +# Log verbosity (DEBUG, INFO, WARNING, ERROR). Leave unset for INFO.
@@ -95,7 +95,7 @@ index 1acb490..381c1d3 100644
 +++ b/backend/config.py
 @@ -129,3 +129,8 @@ LLM_CALL_TIMEOUT_SECONDS = _env_int("LLM_CALL_TIMEOUT_SECONDS", 30)
  # indefinitely -- degrading politely under load rather than falling over.
- MAX_CONCURRENT_LLM_CALLS = _env_int("MAX_CONCURRENT_LLM_CALLS", 6)
+ MAX_CONCURRENT_LLM_CALLS = _env_int("MAX_CONCURRENT_LLM_CALLS", 5)
  LLM_QUEUE_WAIT_SECONDS = _env_int("LLM_QUEUE_WAIT_SECONDS", 10)
 +
 +# --- Logging -------------------------------------------------------------

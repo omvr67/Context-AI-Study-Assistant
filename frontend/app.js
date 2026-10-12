@@ -41,6 +41,38 @@ function getOrCreateDeviceId() {
 }
 const deviceId = getOrCreateDeviceId();
 
+// Hidden admin override for the four shared-course write calls below,
+// while backend/config.py's DEMO_MODE is on (a no-op server-side
+// otherwise, so this has no effect running locally). Visiting the
+// deployed link once with ?admin=<ADMIN_TOKEN> stores it in this
+// browser's localStorage and strips it from the address bar immediately
+// -- nothing else about the page changes, so sharing the link afterward
+// never leaks it, and every other visitor's browser simply never has it.
+function getOrSetAdminToken() {
+  const KEY = "connectx_admin_token";
+  try {
+    const fromUrl = new URLSearchParams(location.search).get("admin");
+    if (fromUrl) {
+      localStorage.setItem(KEY, fromUrl);
+      const url = new URL(location.href);
+      url.searchParams.delete("admin");
+      history.replaceState({}, "", url);
+    }
+    return localStorage.getItem(KEY) || "";
+  } catch (e) {
+    return ""; // private browsing or storage disabled -- same as not being admin
+  }
+}
+const adminToken = getOrSetAdminToken();
+
+// Merges in the X-Admin-Token header when one is set, leaves headers
+// untouched otherwise. Never sets Content-Type itself, so it's safe to
+// pass to a FormData request too (the browser needs to set that header
+// itself, with the multipart boundary, for those to work at all).
+function withAdminHeader(extra = {}) {
+  return adminToken ? { ...extra, "X-Admin-Token": adminToken } : extra;
+}
+
 const thread = document.getElementById("thread");
 const composer = document.getElementById("composer");
 const composerInputWrap = document.getElementById("composerInputWrap");
@@ -53,6 +85,7 @@ const courseList = document.getElementById("courseList");
 const activeCourseTab = document.getElementById("activeCourseTab");
 const notebookScopeTab = document.getElementById("notebookScopeTab");
 const resetBtn = document.getElementById("resetBtn");
+const deleteDataBtn = document.getElementById("deleteDataBtn");
 
 const addCourseBtn = document.getElementById("addCourseBtn");
 const addCourseForm = document.getElementById("addCourseForm");
@@ -358,6 +391,7 @@ function renderChip(course, isAll) {
         formData.append("file", file);
         const res = await fetch(`${API_BASE}/courses/${encodeURIComponent(course.course_code)}/solutions`, {
           method: "POST",
+          headers: withAdminHeader(),
           body: formData,
         });
         if (!res.ok) {
@@ -379,15 +413,19 @@ function renderChip(course, isAll) {
       try {
         const res = await fetch(`${API_BASE}/courses/${encodeURIComponent(course.course_code)}`, {
           method: "DELETE",
+          headers: withAdminHeader(),
         });
-        if (!res.ok) throw new Error(`status ${res.status}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `status ${res.status}`);
+        }
         if (activeCourse === course.course_code) {
           activeCourse = null;
           activeCourseTab.textContent = "All Courses";
         }
         loadCourses();
       } catch (err) {
-        alert("Couldn't remove that course — is the backend running?");
+        alert(err.message || "Couldn't remove that course — is the backend running?");
       }
     });
     chip.appendChild(del);
@@ -1173,6 +1211,29 @@ resetBtn.addEventListener("click", async () => {
   // welcome.js re-inserts a fresh greeting once the thread is cleared.
 });
 
+// Clears this device's entire private notebook plus the current chat/quiz
+// session, server-side, right now -- rather than waiting on the
+// DATA_TTL_HOURS background sweep (see backend/main.py's DELETE /me).
+// Keeps the same deviceId/sessionId afterward (same as Reset conversation
+// above does for sessionId): nothing about either id itself was deleted,
+// they just point at nothing until used again.
+deleteDataBtn.addEventListener("click", async () => {
+  if (!confirm("Delete your notebook uploads and chat history from this device? This can't be undone.")) return;
+  try {
+    const res = await fetch(
+      `${API_BASE}/me?device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" }
+    );
+    if (!res.ok) throw new Error(`status ${res.status}`);
+  } catch (err) {
+    alert("Couldn't delete your data — is the backend running?");
+    return;
+  }
+  thread.innerHTML = "";
+  // welcome.js re-inserts a fresh greeting once the thread is cleared.
+  loadNotebook();
+});
+
 // --- Add-a-syllabus panel: tab switching + both submit flows -------------
 
 addCourseBtn.addEventListener("click", () => {
@@ -1229,7 +1290,7 @@ addCourseTextForm.addEventListener("submit", async (e) => {
   try {
     const res = await fetch(`${API_BASE}/courses`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: withAdminHeader({ "Content-Type": "application/json" }),
       body: JSON.stringify({ course_code, course_name, content }),
     });
     const data = await res.json().catch(() => ({}));
@@ -1275,6 +1336,7 @@ addCoursePdfForm.addEventListener("submit", async (e) => {
   try {
     const res = await fetch(`${API_BASE}/courses/upload`, {
       method: "POST",
+      headers: withAdminHeader(),
       body: formData,
     });
     const data = await res.json().catch(() => ({}));

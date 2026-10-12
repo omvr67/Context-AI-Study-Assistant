@@ -544,6 +544,24 @@ body.rail-collapsed .deck-header {
   letter-spacing: -0.224px;
 }
 
+/* A quieter, rarer action than Reset -- a plain muted text link rather
+   than a second filled button, so it doesn't visually compete for
+   attention it doesn't need. */
+.delete-data-btn {
+  margin-top: 6px;
+  background: transparent;
+  border: none;
+  color: var(--body-muted);
+  padding: 4px 15px;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-align: left;
+}
+.delete-data-btn:hover {
+  color: var(--body-on-dark);
+}
+
 /* ---------- Main deck ---------- */
 .deck {
   position: relative;

@@ -28,10 +28,11 @@ course_solutions_chunk_ids / notebook_solutions_chunk_ids track these
 chunks separately from each course's/doc's own, so a re-upload can replace
 just the solutions instead of duplicating them.
 
-Rate-limiting addition: both /chat and /chat/stream are throttled per
-visitor via backend/rate_limit.py (in-memory, ~15 req/min per client
-IP) before the agent is ever called, and every Groq call inside the
-agent retries with backoff on a 429 -- see backend/agent.py.
+Rate-limiting addition: every endpoint that calls the embedder or the LLM
+is throttled per visitor via backend/rate_limit.py (in-memory, two
+windows -- RATE_LIMIT_PER_MINUTE and RATE_LIMIT_PER_DAY, see
+backend/config.py) before any expensive work happens, and every Groq call
+inside the agent retries with backoff on a 429 -- see backend/agent.py.
 
 Flashcards addition: POST /flashcards, a bare "/flashcards" command
 (typed into the composer, not a button -- see frontend/app.js) that
@@ -79,10 +80,34 @@ with a default that reproduces pre-v1.4 behavior so an existing local
 `.env` with just GROQ_API_KEY keeps working unchanged. CORS now reads
 ALLOWED_ORIGINS instead of a hardcoded wildcard, and the Groq model name
 is configurable via GROQ_MODEL instead of hardcoded. Later patches in
-this round (same file, same config module) add: proxy-aware rate limiting
-across every LLM-calling endpoint, admin-token protection for
-shared-course writes, input/resource caps, visitor-data TTL eviction,
-request timeouts/concurrency limits, and structured logging.
+this round (same file, same config module) add: visitor-data TTL
+eviction, request timeouts/concurrency limits, and structured logging.
+
+Admin-token protection (also v1.4): the four shared-course write
+endpoints (add by text, add by PDF, attach solutions, delete) now call
+_require_admin first. It's a no-op while DEMO_MODE is off, so this has
+zero effect locally. Once a public demo turns DEMO_MODE on, the shared
+course library -- which every visitor reads -- becomes read-only to
+everyone except whoever's browser holds ADMIN_TOKEN (see
+frontend/app.js's getOrSetAdminToken: visiting the deployed link once
+with ?admin=<token> stores it in that browser's localStorage and
+immediately strips it from the address bar). A visitor's own private
+notebook (/notebook/*) is untouched by this -- it was never shared
+across visitors in the first place.
+
+Rate-limit hardening (also v1.4): _client_key now prefers a
+proxy-set header over request.client.host, because behind a tunnel
+(ngrok, Cloudflare Tunnel, ...) every visitor's request arrives at this
+process from the tunnel daemon on localhost -- request.client.host alone
+would be identical for every visitor, the exact "one heavy tester locks
+everyone out" failure rate_limit.py exists to prevent. See its docstring
+for why trusting that header is safe specifically in this setup. The
+throttle itself now has a second, daily window (RATE_LIMIT_PER_DAY) on
+top of the existing per-minute one, and is now enforced -- via the new
+_enforce_rate_limit helper -- on every endpoint that calls the embedder
+or the LLM, not just /chat and /chat/stream: the course/notebook
+upload-and-embed endpoints, /flashcards, /quiz, /retry-quiz, and a
+session reset that asks for a summary.
 
 Same-origin frontend addition: this file now serves frontend/ itself
 (StaticFiles mount at "/", added last so it only ever catches a request
@@ -94,9 +119,60 @@ is now a relative "" for exactly that reason. One visible side effect:
 the old GET "/" health check moved to GET "/health" so "/" is free for
 index.html; same response shape, nothing else about it changed yet (a
 later patch in this round fleshes it out further).
+
+Input/resource caps (also v1.4): /chat and /chat/stream now reject a
+message over MAX_MESSAGE_LENGTH (422); agent.py's _history() trims each
+session to its last HISTORY_WINDOW_TURNS turns -- see that method's own
+docstring. Every PDF upload (course and notebook, main doc and
+solutions) now reads through _read_upload_capped instead of a one-shot
+file.read(), so an oversized body is rejected the moment it exceeds
+MAX_PDF_BYTES on the wire rather than after being pulled fully into
+memory first. /notebook/upload additionally checks
+notebook_store.check_notebook_quota (NOTEBOOK_MAX_DOCS / NOTEBOOK_MAX_MB
+per device) before persisting.
+
+Data lifecycle (also v1.4): a background task (_sweep_loop, started by
+_lifespan at app startup) wakes up every 15 minutes and evicts chat/quiz
+sessions idle longer than DATA_TTL_HOURS (agent.evict_expired_sessions)
+and notebook documents uploaded more than DATA_TTL_HOURS ago
+(notebook_store.evict_expired_notebook_docs), purging the latter's
+vectorstore chunks via the new _purge_notebook_doc_index -- now also
+shared by DELETE /notebook/{doc_id}. DELETE /me is the manual
+counterpart: a visitor can clear their own notebook and chat/quiz session
+immediately rather than waiting on the sweep.
+
+Resilience (also v1.4): the ChatGroq client is now constructed with
+timeout=LLM_CALL_TIMEOUT_SECONDS, bounding every individual HTTP request
+it makes. Separately, agent.py's _invoke_with_backoff/_stream_with_backoff
+now cap how many Groq calls run at once (MAX_CONCURRENT_LLM_CALLS) and
+raise LLMBusyError if a call can't get a slot within
+LLM_QUEUE_WAIT_SECONDS -- /chat and /chat/stream turn that into a normal
+assistant-message reply (agent.py's BUSY_MESSAGE), the same way they
+already do for a 429; /flashcards, /quiz, and /retry-quiz turn it into a
+503 here.
+
+Health + logging (also v1.4, closing out this round): logging.basicConfig
+is configured once at import time (LOG_LEVEL, see backend/config.py),
+replacing the sweep's old print() calls with real logger calls and adding
+a few more: once at startup (model/demo_mode/rate-limit/TTL settings, so
+a launch's actual config is visible in the console it's running in), and
+on a rate-limit or admin-check rejection (the client key, never the
+supplied admin token itself). _log_requests is a middleware logging one
+line per request -- method, path, status, duration -- tagged with a
+short request id that's also echoed back as the X-Request-ID response
+header, skipping static assets so the console stays readable during a
+live demo. GET /health now reports uptime, demo_mode, the model in use,
+the live chat-session count, and llm_calls_in_flight() /
+llm_concurrency_limit (see agent.py) for at-a-glance load visibility.
 """
+import asyncio
+import contextlib
 import json
+import logging
 import os
+import secrets
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -105,8 +181,27 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_groq import ChatGroq
 
-from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limit_error
-from .config import ALLOWED_ORIGINS, GROQ_MODEL
+from .agent import (
+    BUSY_MESSAGE,
+    FRIENDLY_QUOTA_MESSAGE,
+    LLMBusyError,
+    SyllabusAssistantAgent,
+    _is_rate_limit_error,
+    llm_calls_in_flight,
+)
+from .config import (
+    ADMIN_TOKEN,
+    ALLOWED_ORIGINS,
+    DATA_TTL_HOURS,
+    DEMO_MODE,
+    GROQ_MODEL,
+    LLM_CALL_TIMEOUT_SECONDS,
+    LOG_LEVEL,
+    MAX_CONCURRENT_LLM_CALLS,
+    MAX_MESSAGE_LENGTH,
+    RATE_LIMIT_PER_DAY,
+    RATE_LIMIT_PER_MINUTE,
+)
 from .custom_courses import (
     add_course_solutions,
     add_custom_course,
@@ -133,13 +228,17 @@ from .models import (
     SourceChunk,
 )
 from .notebook_store import (
+    NotebookQuotaError,
     add_doc_solutions,
     add_notebook_doc,
+    check_notebook_quota,
+    clear_device_notebook_docs,
+    evict_expired_notebook_docs,
     load_all_notebook_docs,
     load_notebook_docs,
     remove_notebook_doc,
 )
-from .pdf_ingest import PDFValidationError, extract_pdf_pages
+from .pdf_ingest import MAX_PDF_BYTES, PDFValidationError, extract_pdf_pages
 from .rag import (
     add_course_solutions_to_vectorstore,
     add_course_to_vectorstore,
@@ -151,6 +250,19 @@ from .rag import (
 )
 from .rate_limit import check_and_increment
 from .tools import make_notebook_tool, make_tools  # imports functions that create the tools used
+
+# ---------------------------------------------------------------------------
+# Logging: plain text to stdout, one line per request (see _log_requests
+# below) plus the handful of explicit logger.* calls scattered through
+# this file (startup, the data-TTL sweep, rate-limit/admin rejections).
+# No file rotation, no JSON formatter, no third-party log shipper -- this
+# is a single demo process, not a fleet; `uvicorn ... 2>&1 | tee demo.log`
+# is enough to keep a copy if the terminal itself isn't enough.
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("connectx")
+
+_START_TIME = time.monotonic()
 
 # ---------------------------------------------------------------------------
 # Startup: build the vector store, tools, and agent once when the app boots.
@@ -166,7 +278,9 @@ llm = ChatGroq(  # creates the LM interface
     model=GROQ_MODEL,
     temperature=0.0,
     max_tokens=8192, #Increase the max tokens to 8192 for larger context
-    api_key=GROQ_API_KEY)
+    api_key=GROQ_API_KEY,
+    timeout=LLM_CALL_TIMEOUT_SECONDS,  # bounds every HTTP request this client makes to Groq
+)
 
 # vectorstore starts loaded with the 3 hardcoded syllabi *and* anything a
 # student has already saved locally via POST /courses or /courses/upload on
@@ -199,11 +313,80 @@ for _device_id, _docs in load_all_notebook_docs().items():
 tools = make_tools(vectorstore)
 agent = SyllabusAssistantAgent(llm=llm, tools=tools)
 
+logger.info(
+    "ConnectX starting: model=%s demo_mode=%s admin_token_set=%s "
+    "rate_limit=%d/min,%d/day data_ttl=%dh max_concurrent_llm=%d courses_indexed=%d",
+    GROQ_MODEL, DEMO_MODE, ADMIN_TOKEN is not None,
+    RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_DAY, DATA_TTL_HOURS, MAX_CONCURRENT_LLM_CALLS,
+    len(course_chunk_ids),
+)
+
 BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
-app = FastAPI(title="ConnectX Syllabus & Exam Assistant")
+DATA_TTL_SECONDS = DATA_TTL_HOURS * 3600
+_SWEEP_INTERVAL_SECONDS = 15 * 60  # how often the background task checks, not the TTL itself
+
+
+def _purge_notebook_doc_index(doc_id: str) -> None:
+    """Drops one notebook doc's vectorstore chunks (main content and, if
+    attached, solutions) from the live FAISS index and from the chunk-id
+    tracking dicts. Shared by DELETE /notebook/{doc_id}, DELETE /me, and
+    the DATA_TTL_HOURS sweep below -- every place a notebook doc's
+    underlying *record* has already been removed from notebook_store.py
+    and just needs its index entries cleaned up to match.
+    """
+    ids = notebook_chunk_ids.pop(doc_id, None)
+    if ids:
+        remove_course_from_vectorstore(vectorstore, ids)
+    solutions_ids = notebook_solutions_chunk_ids.pop(doc_id, None)
+    if solutions_ids:
+        remove_course_from_vectorstore(vectorstore, solutions_ids)
+
+
+def _sweep_expired_data() -> None:
+    """One sweep pass: evicts chat/quiz sessions idle longer than
+    DATA_TTL_HOURS (agent.evict_expired_sessions) and notebook documents
+    uploaded more than DATA_TTL_HOURS ago (evict_expired_notebook_docs),
+    purging the latter's vectorstore chunks too. Logged on stdout when it
+    actually does something, so an operator watching the demo server's
+    console can see the sweep is really running rather than just trusting
+    that it will.
+    """
+    evicted_sessions = agent.evict_expired_sessions(DATA_TTL_SECONDS)
+    expired_docs = evict_expired_notebook_docs(DATA_TTL_SECONDS)
+    for doc in expired_docs:
+        _purge_notebook_doc_index(doc["doc_id"])
+    if evicted_sessions or expired_docs:
+        logger.info("data-ttl sweep: evicted %d session(s), %d notebook doc(s)", evicted_sessions, len(expired_docs))
+
+
+async def _sweep_loop() -> None:
+    while True:
+        await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+        try:
+            _sweep_expired_data()
+        except Exception as e:  # a sweep bug should never take the server down
+            logger.warning("data-ttl sweep failed: %s", e)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Starts the DATA_TTL_HOURS background sweep alongside the app and
+    cancels it on shutdown. DATA_TTL_HOURS <= 0 disables the sweep
+    entirely (no task started) rather than spinning in a loop that would
+    never find anything to evict.
+    """
+    task = asyncio.create_task(_sweep_loop()) if DATA_TTL_SECONDS > 0 else None
+    yield
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="ConnectX Syllabus & Exam Assistant", lifespan=_lifespan)
 
 # ALLOWED_ORIGINS defaults to "*" (today's behavior) when unset -- fine for
 # local dev, but set it to the real tunnel/deploy origin in .env before
@@ -214,6 +397,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# One access-log line per request, each tagged with a short request id
+# (also echoed back as the X-Request-ID response header, so a specific
+# browser request can be matched to a specific server log line while
+# watching a live demo). Skips static assets (style.css, app.js, the
+# vendored libraries, fonts, ...) served by the StaticFiles mount at the
+# bottom of this file -- every real API route below has no file extension
+# in its path, which is what the check below actually keys on, so this
+# needs no separate list of routes to stay in sync with.
+_STATIC_EXTENSIONS = (".css", ".js", ".html", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2")
+
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    if request.url.path.lower().endswith(_STATIC_EXTENSIONS):
+        return await call_next(request)
+
+    request_id = uuid.uuid4().hex[:8]
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "%s %s %s -> %d (%.0fms)",
+        request_id, request.method, request.url.path, response.status_code, duration_ms,
+    )
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 def _course_registry() -> dict[str, dict]:
@@ -242,12 +453,108 @@ def _course_registry() -> dict[str, dict]:
 
 
 def _client_key(request: Request) -> str:
-    """Best-effort visitor identifier for the rate limiter -- the client IP
-    as FastAPI/Starlette sees it. Falls back to a constant if it's ever
-    missing (e.g. certain test clients) so throttling degrades to "shared
-    across all such requests" instead of crashing.
+    """Best-effort visitor identifier for the rate limiter.
+
+    Behind a tunnel (ngrok, Cloudflare Tunnel, localtunnel, ...) every
+    request reaches this process from the tunnel daemon on localhost, so
+    request.client.host alone is identical for every visitor -- exactly
+    the failure mode rate_limit.py exists to prevent. Trusting a
+    forwarded-IP header is normally risky (a client could just set it
+    themselves), but that's not a realistic path here: nothing external
+    can reach this process directly, only the local tunnel daemon can, so
+    whatever header it sets is the one piece of information actually
+    coming from outside.
+
+    Prefers Cloudflare's CF-Connecting-IP (set by Cloudflare's own edge,
+    not by the tunnel binary, so it's the hardest of the three to spoof),
+    then the first hop of a standard X-Forwarded-For chain (what ngrok
+    and localtunnel both set), then falls back to request.client.host
+    unchanged -- today's exact behavior -- for plain local development
+    with no proxy in front at all.
     """
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first_hop = forwarded.split(",")[0].strip()
+    if first_hop:
+        return first_hop
+
     return request.client.host if request.client else "unknown"
+
+
+def _enforce_rate_limit(request: Request, action: str = "requests") -> None:
+    """Shared throttle check for every endpoint that calls the embedder or
+    the LLM -- see backend/rate_limit.py for the actual windows. Raises a
+    429 naming `action` (e.g. "messages", "quiz requests") if this
+    visitor has exceeded either window; otherwise records the request and
+    returns normally.
+    """
+    key = _client_key(request)
+    allowed, retry_after = check_and_increment(key)
+    if not allowed:
+        logger.warning("rate limit: %s blocked for %ds (%s)", key, retry_after, action)
+        raise HTTPException(
+            status_code=429,
+            detail=f"You're sending {action} a little fast -- please wait {retry_after}s and try again.",
+        )
+
+
+def _require_admin(request: Request) -> None:
+    """Guards shared-course writes (add/upload/attach-solutions/delete)
+    while DEMO_MODE is on. A no-op when DEMO_MODE is off, so local
+    development is completely unaffected by this check -- same principle
+    as every other v1.4 setting (see backend/config.py).
+
+    No ADMIN_TOKEN configured means no admin access at all (shared writes
+    locked outright) rather than failing open, per DEMO_MODE's own
+    docstring -- that's a 403, since no token anyone could send would
+    help. A configured token that the request doesn't present or gets
+    wrong is a 401, since supplying the right one *would* help. Token
+    comparison is constant-time (secrets.compare_digest) so response
+    timing can't be used to guess it character by character.
+    """
+    if not DEMO_MODE:
+        return
+    if ADMIN_TOKEN is None:
+        raise HTTPException(status_code=403, detail="Shared-course writes are locked for this demo.")
+    supplied = request.headers.get("x-admin-token", "")
+    if not secrets.compare_digest(supplied, ADMIN_TOKEN):
+        # Never log the supplied value itself -- only that an attempt failed.
+        logger.warning("admin check failed: %s %s from %s", request.method, request.url.path, _client_key(request))
+        raise HTTPException(status_code=401, detail="Missing or invalid admin token.")
+
+
+async def _read_upload_capped(file: UploadFile, max_bytes: int = MAX_PDF_BYTES) -> bytes:
+    """Reads an uploaded file in bounded 1 MB chunks, raising 413 the
+    instant the real byte count exceeds max_bytes.
+
+    `await file.read()` (the one-shot version used at every upload site
+    before this) pulls the *entire* body into memory first and only
+    rejects it afterward, via pdf_ingest.py's own MAX_PDF_BYTES check
+    inside validate_pdf_header -- so an oversized upload still costs full
+    memory for however long that takes. A client-declared Content-Length
+    header isn't trusted here either (trivial to omit or understate); this
+    reads real bytes off the wire and stops the moment they exceed the
+    cap, so it's the one check that actually bounds memory regardless of
+    what the request claims about itself.
+    """
+    chunks = []
+    total = 0
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File is too large (max {max_bytes // (1024 * 1024)} MB).",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _require_device_id(device_id: str | None) -> str:
@@ -271,10 +578,16 @@ def health_check():
     return {
         "status": "ok",
         "service": "syllabus-exam-assistant",
+        "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
+        "demo_mode": DEMO_MODE,
+        "model": GROQ_MODEL,
         "courses_indexed": len(course_chunk_ids),
         "notebook_docs_indexed": len(notebook_chunk_ids),
         "courses_with_solutions": len(course_solutions_chunk_ids),
         "notebook_docs_with_solutions": len(notebook_solutions_chunk_ids),
+        "active_chat_sessions": len(agent._sessions),
+        "llm_calls_in_flight": llm_calls_in_flight(),
+        "llm_concurrency_limit": MAX_CONCURRENT_LLM_CALLS,
     }
 
 
@@ -295,13 +608,16 @@ def list_courses():
 
 
 @app.post("/courses", response_model=CourseInfo, status_code=201)
-def add_course(req: AddCourseRequest):
+def add_course(req: AddCourseRequest, request: Request):
     code = req.course_code.strip().upper()
     name = req.course_name.strip()
     content = req.content.strip()
 
     if not code or not name or not content:
         raise HTTPException(status_code=422, detail="course_code, course_name, and content are all required")
+
+    _require_admin(request)
+    _enforce_rate_limit(request, "course uploads")
     if code in BASE_COURSE_CODES:
         raise HTTPException(status_code=409, detail=f"'{code}' is a built-in course and can't be overwritten")
     if len(content) < 30:
@@ -321,6 +637,7 @@ def add_course(req: AddCourseRequest):
 
 @app.post("/courses/upload", response_model=CourseInfo, status_code=201)
 async def upload_course_pdf(
+    request: Request,
     course_code: str = Form(...),
     course_name: str = Form(...),
     append: bool = Form(False),
@@ -345,11 +662,14 @@ async def upload_course_pdf(
     if code in BASE_COURSE_CODES:
         raise HTTPException(status_code=409, detail=f"'{code}' is a built-in course and can't be overwritten")
 
+    _require_admin(request)
+    _enforce_rate_limit(request, "course uploads")
+
     filename = (file.filename or "").lower()
     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
 
-    data = await file.read()
+    data = await _read_upload_capped(file)
     try:
         pages = extract_pdf_pages(data)
     except PDFValidationError as e:
@@ -371,10 +691,12 @@ async def upload_course_pdf(
 
 
 @app.delete("/courses/{course_code}")
-def delete_course(course_code: str):
+def delete_course(course_code: str, request: Request):
     code = course_code.strip().upper()
     if code in BASE_COURSE_CODES:
         raise HTTPException(status_code=403, detail="Built-in courses can't be deleted")
+
+    _require_admin(request)
 
     ids = course_chunk_ids.pop(code, None)
     solutions_ids = course_solutions_chunk_ids.pop(code, None)
@@ -390,7 +712,7 @@ def delete_course(course_code: str):
 
 
 @app.post("/courses/{course_code}/solutions", response_model=CourseInfo, status_code=201)
-async def upload_course_solutions(course_code: str, file: UploadFile = File(...)):
+async def upload_course_solutions(course_code: str, request: Request, file: UploadFile = File(...)):
     """Attaches a solutions/answer-key PDF to an existing custom course.
     Indexed under the same course_code as the course's own material, but
     tagged material="solutions" so search_syllabus's citations -- and the
@@ -414,11 +736,14 @@ async def upload_course_solutions(course_code: str, file: UploadFile = File(...)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"No custom course '{code}' found -- add the course itself first")
 
+    _require_admin(request)
+    _enforce_rate_limit(request, "course uploads")
+
     filename = (file.filename or "").lower()
     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
 
-    data = await file.read()
+    data = await _read_upload_capped(file)
     try:
         pages = extract_pdf_pages(data)
     except PDFValidationError as e:
@@ -465,6 +790,7 @@ def list_notebook(device_id: str = Query(...)):
 
 @app.post("/notebook/upload", response_model=NotebookDocInfo, status_code=201)
 async def upload_notebook_pdf(
+    request: Request,
     device_id: str = Form(...),
     title: str = Form(...),
     file: UploadFile = File(...),
@@ -480,15 +806,22 @@ async def upload_notebook_pdf(
     if not doc_title:
         raise HTTPException(status_code=422, detail="title is required")
 
+    _enforce_rate_limit(request, "uploads")
+
     filename = (file.filename or "").lower()
     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
 
-    data = await file.read()
+    data = await _read_upload_capped(file)
     try:
         pages = extract_pdf_pages(data)
     except PDFValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        check_notebook_quota(device_id, pages)
+    except NotebookQuotaError as e:
+        raise HTTPException(status_code=413, detail=str(e))
 
     saved = add_notebook_doc(device_id, doc_title, pages)
     notebook_chunk_ids[saved["doc_id"]] = add_notebook_doc_to_vectorstore(
@@ -511,17 +844,32 @@ def delete_notebook_doc(doc_id: str, device_id: str = Query(...)):
         raise HTTPException(status_code=404, detail=f"No notebook document '{doc_id}' found")
 
     remove_notebook_doc(device_id, doc_id)
-    ids = notebook_chunk_ids.pop(doc_id, None)
-    solutions_ids = notebook_solutions_chunk_ids.pop(doc_id, None)
-    if ids:
-        remove_course_from_vectorstore(vectorstore, ids)
-    if solutions_ids:
-        remove_course_from_vectorstore(vectorstore, solutions_ids)
+    _purge_notebook_doc_index(doc_id)
     return {"status": "deleted", "doc_id": doc_id}
 
 
+@app.delete("/me")
+def delete_my_data(device_id: str = Query(...), session_id: str = Query(...)):
+    """Manual "delete my data": clears this device's entire private
+    notebook and this browser's chat/quiz session immediately, instead of
+    waiting for the DATA_TTL_HOURS sweep. Both ids are exactly what the
+    frontend already holds (device_id in localStorage, session_id
+    in-memory for the current tab) -- there's no account system to check
+    either against beyond that, same as every other notebook/chat
+    endpoint in this file.
+    """
+    device_id = _require_device_id(device_id)
+    removed_docs = clear_device_notebook_docs(device_id)
+    for doc in removed_docs:
+        _purge_notebook_doc_index(doc["doc_id"])
+    agent.reset(session_id)
+    return {"status": "deleted", "notebook_docs_removed": len(removed_docs)}
+
+
 @app.post("/notebook/{doc_id}/solutions", response_model=NotebookDocInfo, status_code=201)
-async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), file: UploadFile = File(...)):
+async def upload_notebook_solutions(
+    doc_id: str, request: Request, device_id: str = Form(...), file: UploadFile = File(...)
+):
     """Notebook equivalent of POST /courses/{course_code}/solutions: attaches
     a solutions/answer-key PDF to one of the caller's own notebook docs.
     Ownership is checked the same way delete_notebook_doc checks it -- a
@@ -537,11 +885,13 @@ async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), fil
     if existing is None:
         raise HTTPException(status_code=404, detail=f"No notebook document '{doc_id}' found")
 
+    _enforce_rate_limit(request, "uploads")
+
     filename = (file.filename or "").lower()
     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
 
-    data = await file.read()
+    data = await _read_upload_capped(file)
     try:
         pages = extract_pdf_pages(data)
     except PDFValidationError as e:
@@ -573,7 +923,7 @@ async def upload_notebook_solutions(doc_id: str, device_id: str = Form(...), fil
 
 
 @app.post("/flashcards", response_model=FlashcardDeck)
-def generate_flashcards_endpoint(req: FlashcardsRequest):
+def generate_flashcards_endpoint(req: FlashcardsRequest, request: Request):
     transcript = agent.recent_transcript(req.session_id)
     if not transcript:
         raise HTTPException(
@@ -581,8 +931,12 @@ def generate_flashcards_endpoint(req: FlashcardsRequest):
             detail="Nothing to build flashcards from yet -- chat about a topic first, then try /flashcards again.",
         )
 
+    _enforce_rate_limit(request, "flashcard requests")
+
     try:
         topic, cards = agent.generate_flashcards_from_conversation(transcript, count=10)
+    except LLMBusyError:
+        raise HTTPException(status_code=503, detail=BUSY_MESSAGE)
     except Exception as e:
         detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate flashcards: {e}"
         raise HTTPException(status_code=502, detail=detail)
@@ -609,7 +963,7 @@ def generate_flashcards_endpoint(req: FlashcardsRequest):
 
 
 @app.post("/quiz", response_model=QuizDeck)
-def generate_quiz_endpoint(req: QuizRequest):
+def generate_quiz_endpoint(req: QuizRequest, request: Request):
     transcript = agent.recent_transcript(req.session_id)
     if not transcript:
         raise HTTPException(
@@ -617,8 +971,12 @@ def generate_quiz_endpoint(req: QuizRequest):
             detail="Nothing to build a quiz from yet -- chat about a topic first, then try /quiz again.",
         )
 
+    _enforce_rate_limit(request, "quiz requests")
+
     try:
         topic, questions = agent.generate_quiz_from_conversation(transcript, count=5)
+    except LLMBusyError:
+        raise HTTPException(status_code=503, detail=BUSY_MESSAGE)
     except Exception as e:
         detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate a quiz: {e}"
         raise HTTPException(status_code=502, detail=detail)
@@ -641,9 +999,13 @@ def record_quiz_results_endpoint(req: QuizResultsRequest):
 
 
 @app.post("/retry-quiz", response_model=QuizDeck)
-def generate_retry_quiz_endpoint(req: QuizRequest):
+def generate_retry_quiz_endpoint(req: QuizRequest, request: Request):
+    _enforce_rate_limit(request, "quiz requests")
+
     try:
         result = agent.generate_retry_quiz(req.session_id, count=5)
+    except LLMBusyError:
+        raise HTTPException(status_code=503, detail=BUSY_MESSAGE)
     except Exception as e:
         detail = FRIENDLY_QUOTA_MESSAGE if _is_rate_limit_error(e) else f"Couldn't generate a retry quiz: {e}"
         raise HTTPException(status_code=502, detail=detail)
@@ -709,13 +1071,10 @@ def _notebook_scope(req: ChatRequest):
 def chat(req: ChatRequest, request: Request):
     if not req.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
+    if len(req.message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=422, detail=f"Message is too long (max {MAX_MESSAGE_LENGTH} characters).")
 
-    allowed, retry_after = check_and_increment(_client_key(request))
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
-        )
+    _enforce_rate_limit(request, "messages")
 
     extra_tools, exclude_tool_names, extra_system_prompt = _notebook_scope(req)
     result = agent.chat(
@@ -760,13 +1119,10 @@ def chat_stream(req: ChatRequest, request: Request):
     """
     if not req.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
+    if len(req.message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=422, detail=f"Message is too long (max {MAX_MESSAGE_LENGTH} characters).")
 
-    allowed, retry_after = check_and_increment(_client_key(request))
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"You're sending messages a little fast -- please wait {retry_after}s and try again.",
-        )
+    _enforce_rate_limit(request, "messages")
 
     user_input = _prefixed_input(req)
     extra_tools, exclude_tool_names, extra_system_prompt = _notebook_scope(req)
@@ -798,7 +1154,9 @@ def chat_stream(req: ChatRequest, request: Request):
 
 # Resets the session, optionally returning a short recap first
 @app.delete("/chat/{session_id}", response_model=ResetResponse)
-def reset_session(session_id: str, summarize: bool = Query(False)):
+def reset_session(session_id: str, request: Request, summarize: bool = Query(False)):
+    if summarize:
+        _enforce_rate_limit(request, "summary requests")
     summary = agent.summarize(session_id) if summarize else None
     agent.reset(session_id)
     return ResetResponse(status="reset", session_id=session_id, summary=summary)
