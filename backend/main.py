@@ -70,6 +70,20 @@ correctness from free-form chat. DELETE /chat/{session_id} (reset)
 clears a session's quiz history alongside its chat history, so a retry
 quiz always draws on the conversation actually still in front of the
 student.
+
+v1.4 (production-readiness round, delivered as several small stacked
+patches rather than one large one): starting with config foundation --
+backend/config.py centralizes the environment-driven settings this round
+introduces (model name, demo-mode flag, admin token, CORS origins), each
+with a default that reproduces pre-v1.4 behavior so an existing local
+`.env` with just GROQ_API_KEY keeps working unchanged. CORS now reads
+ALLOWED_ORIGINS instead of a hardcoded wildcard, and the Groq model name
+is configurable via GROQ_MODEL instead of hardcoded. Later patches in
+this round (same file, same config module) add: a same-origin frontend,
+proxy-aware rate limiting across every LLM-calling endpoint, admin-token
+protection for shared-course writes, input/resource caps, visitor-data
+TTL eviction, request timeouts/concurrency limits, and a real health
+endpoint with structured logging.
 """
 import json
 import os
@@ -80,6 +94,7 @@ from fastapi.responses import StreamingResponse
 from langchain_groq import ChatGroq
 
 from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limit_error
+from .config import ALLOWED_ORIGINS, GROQ_MODEL
 from .custom_courses import (
     add_course_solutions,
     add_custom_course,
@@ -136,7 +151,7 @@ if not GROQ_API_KEY:
     )
 
 llm = ChatGroq(  # creates the LM interface
-    model="openai/gpt-oss-120b",
+    model=GROQ_MODEL,
     temperature=0.0,
     max_tokens=8192, #Increase the max tokens to 8192 for larger context
     api_key=GROQ_API_KEY)
@@ -176,10 +191,12 @@ BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
 
 app = FastAPI(title="ConnectX Syllabus & Exam Assistant")
 
-# Wide-open CORS for local development against the vanilla-JS frontend.
+# ALLOWED_ORIGINS defaults to "*" (today's behavior) when unset -- fine for
+# local dev, but set it to the real tunnel/deploy origin in .env before
+# sharing a public link. See backend/config.py.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
