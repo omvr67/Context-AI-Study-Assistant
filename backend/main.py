@@ -79,18 +79,30 @@ with a default that reproduces pre-v1.4 behavior so an existing local
 `.env` with just GROQ_API_KEY keeps working unchanged. CORS now reads
 ALLOWED_ORIGINS instead of a hardcoded wildcard, and the Groq model name
 is configurable via GROQ_MODEL instead of hardcoded. Later patches in
-this round (same file, same config module) add: a same-origin frontend,
-proxy-aware rate limiting across every LLM-calling endpoint, admin-token
-protection for shared-course writes, input/resource caps, visitor-data
-TTL eviction, request timeouts/concurrency limits, and a real health
-endpoint with structured logging.
+this round (same file, same config module) add: proxy-aware rate limiting
+across every LLM-calling endpoint, admin-token protection for
+shared-course writes, input/resource caps, visitor-data TTL eviction,
+request timeouts/concurrency limits, and structured logging.
+
+Same-origin frontend addition: this file now serves frontend/ itself
+(StaticFiles mount at "/", added last so it only ever catches a request
+none of the API routes above already matched) instead of the frontend
+being opened separately via file:// or a second dev server. That's what
+makes the tunnel-shared demo actually work -- a browser refuses to let an
+https tunnel page call a plain http API, and frontend/app.js's API_BASE
+is now a relative "" for exactly that reason. One visible side effect:
+the old GET "/" health check moved to GET "/health" so "/" is free for
+index.html; same response shape, nothing else about it changed yet (a
+later patch in this round fleshes it out further).
 """
 import json
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware  # connects the front and back ends in browser
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_groq import ChatGroq
 
 from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limit_error
@@ -189,6 +201,8 @@ agent = SyllabusAssistantAgent(llm=llm, tools=tools)
 
 BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
 
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
 app = FastAPI(title="ConnectX Syllabus & Exam Assistant")
 
 # ALLOWED_ORIGINS defaults to "*" (today's behavior) when unset -- fine for
@@ -249,8 +263,10 @@ def _require_device_id(device_id: str | None) -> str:
     return device_id
 
 
-# Backend security check
-@app.get("/")
+# Backend security check. Moved off "/" in v1.4 so the frontend's
+# index.html can be served there instead (see the StaticFiles mount at the
+# bottom of this file) -- a later v1.4 patch extends this response.
+@app.get("/health")
 def health_check():
     return {
         "status": "ok",
@@ -786,3 +802,12 @@ def reset_session(session_id: str, summarize: bool = Query(False)):
     summary = agent.summarize(session_id) if summarize else None
     agent.reset(session_id)
     return ResetResponse(status="reset", session_id=session_id, summary=summary)
+
+
+# --- Same-origin frontend ----------------------------------------------
+# Must be the LAST route added: FastAPI/Starlette checks routes in the
+# order they were registered, and a Mount("/") matches any path as a
+# prefix -- so every API route above still gets first look at a request,
+# and this mount only ever ends up serving an actual static file (or,
+# with html=True, index.html for "/" and any other directory-style path).
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

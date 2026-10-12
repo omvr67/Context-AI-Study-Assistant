@@ -1,0 +1,399 @@
+diff --git a/.env.example b/.env.example
+index eb24029..6e9cefa 100644
+--- a/.env.example
++++ b/.env.example
+@@ -32,3 +32,8 @@ GROQ_API_KEY="your_groq_api_key_here"
+ # HISTORY_WINDOW_TURNS="20"       # most recent turns kept in a session's prompt
+ # NOTEBOOK_MAX_DOCS="5"           # PDFs per device in the private notebook
+ # NOTEBOOK_MAX_MB="50"            # total extracted-text size per device
++
++# Hours of inactivity before a chat session (and its quiz history) or a
++# notebook upload is auto-deleted by a background sweep. Set to "0" to
++# disable the sweep entirely. Leave unset for the default (24).
++# DATA_TTL_HOURS="24"
+diff --git a/backend/agent.py b/backend/agent.py
+index 8a1c559..82f933f 100644
+--- a/backend/agent.py
++++ b/backend/agent.py
+@@ -105,7 +105,9 @@ HISTORY_WINDOW_TURNS turns (see backend/config.py) before returning it,
+ so a long-running demo session's token usage and latency stay bounded
+ instead of resending the entire conversation forever. See
+ _trim_history()'s own docstring for why the cut is always exactly on a
+-HumanMessage boundary.
++HumanMessage boundary. Also added evict_expired_sessions(), called by
++main.py's background DATA_TTL_HOURS sweep to clear sessions idle longer
++than the configured TTL.
+ """
+ import re
+ import time
+@@ -331,9 +333,16 @@ class SyllabusAssistantAgent:
+         # make sense.
+         self._quiz_attempts: dict[str, list[dict]] = {}
+ 
++        # v1.4: last-touched time per session_id, for evict_expired_sessions()
++        # below. Updated in _history() -- the one call both chat() and
++        # chat_stream() make before anything else -- so "last active" means
++        # exactly what it says regardless of which entry point was used.
++        self._session_last_active: dict[str, float] = {}
++
+     def _history(self, session_id: str) -> list:
+         if session_id not in self._sessions:
+             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
++        self._session_last_active[session_id] = time.time()
+         history = self._sessions[session_id]
+         self._trim_history(history)
+         return history
+@@ -413,6 +422,22 @@ class SyllabusAssistantAgent:
+         """Clears a session's memory; the next turn starts a fresh SystemMessage."""
+         self._sessions.pop(session_id, None)
+         self._quiz_attempts.pop(session_id, None)
++        self._session_last_active.pop(session_id, None)
++
++    def evict_expired_sessions(self, ttl_seconds: float) -> int:
++        """Clears every session idle for longer than ttl_seconds -- chat
++        history and quiz history together, via reset() above, so the two
++        never drift out of sync. Called from main.py's background sweep
++        (DATA_TTL_HOURS, see backend/config.py); returns how many
++        sessions were evicted, purely so the sweep has something to log.
++        """
++        if ttl_seconds <= 0:
++            return 0
++        cutoff = time.time() - ttl_seconds
++        expired = [sid for sid, last in self._session_last_active.items() if last < cutoff]
++        for sid in expired:
++            self.reset(sid)
++        return len(expired)
+ 
+     def recent_transcript(self, session_id: str, max_chars: int = 4000) -> str:
+         """Plain "Student: .../Assistant: ..." transcript of a session's
+diff --git a/backend/config.py b/backend/config.py
+index 7ae3a61..7d57e10 100644
+--- a/backend/config.py
++++ b/backend/config.py
+@@ -104,3 +104,12 @@ HISTORY_WINDOW_TURNS = _env_int("HISTORY_WINDOW_TURNS", 20)
+ # to model a real product quota.
+ NOTEBOOK_MAX_DOCS = _env_int("NOTEBOOK_MAX_DOCS", 5)
+ NOTEBOOK_MAX_MB = _env_int("NOTEBOOK_MAX_MB", 50)
++
++# --- Data lifecycle ---------------------------------------------------------
++# Visitor data -- chat sessions (and the quiz history tied to them) and
++# notebook uploads -- is swept away after this many hours of inactivity,
++# by a background task started in main.py (see its lifespan handler), not
++# a real cron job, since this is a single demo process. Not gated behind
++# DEMO_MODE: an idle local-dev session is presumably abandoned too, so
++# there's no reason to only bound memory/disk growth in demo mode.
++DATA_TTL_HOURS = _env_int("DATA_TTL_HOURS", 24)
+diff --git a/backend/main.py b/backend/main.py
+index d437d7a..6184666 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -130,7 +130,19 @@ MAX_PDF_BYTES on the wire rather than after being pulled fully into
+ memory first. /notebook/upload additionally checks
+ notebook_store.check_notebook_quota (NOTEBOOK_MAX_DOCS / NOTEBOOK_MAX_MB
+ per device) before persisting.
++
++Data lifecycle (also v1.4): a background task (_sweep_loop, started by
++_lifespan at app startup) wakes up every 15 minutes and evicts chat/quiz
++sessions idle longer than DATA_TTL_HOURS (agent.evict_expired_sessions)
++and notebook documents uploaded more than DATA_TTL_HOURS ago
++(notebook_store.evict_expired_notebook_docs), purging the latter's
++vectorstore chunks via the new _purge_notebook_doc_index -- now also
++shared by DELETE /notebook/{doc_id}. DELETE /me is the manual
++counterpart: a visitor can clear their own notebook and chat/quiz session
++immediately rather than waiting on the sweep.
+ """
++import asyncio
++import contextlib
+ import json
+ import os
+ import secrets
+@@ -146,6 +158,7 @@ from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limi
+ from .config import (
+     ADMIN_TOKEN,
+     ALLOWED_ORIGINS,
++    DATA_TTL_HOURS,
+     DEMO_MODE,
+     GROQ_MODEL,
+     MAX_MESSAGE_LENGTH,
+@@ -180,6 +193,8 @@ from .notebook_store import (
+     add_doc_solutions,
+     add_notebook_doc,
+     check_notebook_quota,
++    clear_device_notebook_docs,
++    evict_expired_notebook_docs,
+     load_all_notebook_docs,
+     load_notebook_docs,
+     remove_notebook_doc,
+@@ -248,7 +263,68 @@ BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
+ 
+ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+ 
+-app = FastAPI(title="ConnectX Syllabus & Exam Assistant")
++DATA_TTL_SECONDS = DATA_TTL_HOURS * 3600
++_SWEEP_INTERVAL_SECONDS = 15 * 60  # how often the background task checks, not the TTL itself
++
++
++def _purge_notebook_doc_index(doc_id: str) -> None:
++    """Drops one notebook doc's vectorstore chunks (main content and, if
++    attached, solutions) from the live FAISS index and from the chunk-id
++    tracking dicts. Shared by DELETE /notebook/{doc_id}, DELETE /me, and
++    the DATA_TTL_HOURS sweep below -- every place a notebook doc's
++    underlying *record* has already been removed from notebook_store.py
++    and just needs its index entries cleaned up to match.
++    """
++    ids = notebook_chunk_ids.pop(doc_id, None)
++    if ids:
++        remove_course_from_vectorstore(vectorstore, ids)
++    solutions_ids = notebook_solutions_chunk_ids.pop(doc_id, None)
++    if solutions_ids:
++        remove_course_from_vectorstore(vectorstore, solutions_ids)
++
++
++def _sweep_expired_data() -> None:
++    """One sweep pass: evicts chat/quiz sessions idle longer than
++    DATA_TTL_HOURS (agent.evict_expired_sessions) and notebook documents
++    uploaded more than DATA_TTL_HOURS ago (evict_expired_notebook_docs),
++    purging the latter's vectorstore chunks too. Logged on stdout when it
++    actually does something, so an operator watching the demo server's
++    console can see the sweep is really running rather than just trusting
++    that it will.
++    """
++    evicted_sessions = agent.evict_expired_sessions(DATA_TTL_SECONDS)
++    expired_docs = evict_expired_notebook_docs(DATA_TTL_SECONDS)
++    for doc in expired_docs:
++        _purge_notebook_doc_index(doc["doc_id"])
++    if evicted_sessions or expired_docs:
++        print(f"[data-ttl] evicted {evicted_sessions} session(s), {len(expired_docs)} notebook doc(s)")
++
++
++async def _sweep_loop() -> None:
++    while True:
++        await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
++        try:
++            _sweep_expired_data()
++        except Exception as e:  # a sweep bug should never take the server down
++            print(f"[data-ttl] sweep failed: {e}")
++
++
++@contextlib.asynccontextmanager
++async def _lifespan(app: FastAPI):
++    """Starts the DATA_TTL_HOURS background sweep alongside the app and
++    cancels it on shutdown. DATA_TTL_HOURS <= 0 disables the sweep
++    entirely (no task started) rather than spinning in a loop that would
++    never find anything to evict.
++    """
++    task = asyncio.create_task(_sweep_loop()) if DATA_TTL_SECONDS > 0 else None
++    yield
++    if task is not None:
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++app = FastAPI(title="ConnectX Syllabus & Exam Assistant", lifespan=_lifespan)
+ 
+ # ALLOWED_ORIGINS defaults to "*" (today's behavior) when unset -- fine for
+ # local dev, but set it to the real tunnel/deploy origin in .env before
+@@ -668,15 +744,28 @@ def delete_notebook_doc(doc_id: str, device_id: str = Query(...)):
+         raise HTTPException(status_code=404, detail=f"No notebook document '{doc_id}' found")
+ 
+     remove_notebook_doc(device_id, doc_id)
+-    ids = notebook_chunk_ids.pop(doc_id, None)
+-    solutions_ids = notebook_solutions_chunk_ids.pop(doc_id, None)
+-    if ids:
+-        remove_course_from_vectorstore(vectorstore, ids)
+-    if solutions_ids:
+-        remove_course_from_vectorstore(vectorstore, solutions_ids)
++    _purge_notebook_doc_index(doc_id)
+     return {"status": "deleted", "doc_id": doc_id}
+ 
+ 
++@app.delete("/me")
++def delete_my_data(device_id: str = Query(...), session_id: str = Query(...)):
++    """Manual "delete my data": clears this device's entire private
++    notebook and this browser's chat/quiz session immediately, instead of
++    waiting for the DATA_TTL_HOURS sweep. Both ids are exactly what the
++    frontend already holds (device_id in localStorage, session_id
++    in-memory for the current tab) -- there's no account system to check
++    either against beyond that, same as every other notebook/chat
++    endpoint in this file.
++    """
++    device_id = _require_device_id(device_id)
++    removed_docs = clear_device_notebook_docs(device_id)
++    for doc in removed_docs:
++        _purge_notebook_doc_index(doc["doc_id"])
++    agent.reset(session_id)
++    return {"status": "deleted", "notebook_docs_removed": len(removed_docs)}
++
++
+ @app.post("/notebook/{doc_id}/solutions", response_model=NotebookDocInfo, status_code=201)
+ async def upload_notebook_solutions(
+     doc_id: str, request: Request, device_id: str = Form(...), file: UploadFile = File(...)
+diff --git a/backend/notebook_store.py b/backend/notebook_store.py
+index eb2dfe3..31e116d 100644
+--- a/backend/notebook_store.py
++++ b/backend/notebook_store.py
+@@ -19,9 +19,15 @@ and rag.add_notebook_solutions_to_vectorstore).
+ 
+ v1.4: added check_notebook_quota(), a per-device cap (NOTEBOOK_MAX_DOCS /
+ NOTEBOOK_MAX_MB, see backend/config.py) that main.py's /notebook/upload
+-calls before persisting a new document.
++calls before persisting a new document. Also added a "created_at" field
++to every new record and two more functions: evict_expired_notebook_docs()
++(DATA_TTL_HOURS cleanup, called by main.py's background sweep) and
++clear_device_notebook_docs() (the manual "delete my data" path, DELETE
++/me). A record saved before this patch has no "created_at" and is simply
++never swept -- see evict_expired_notebook_docs()'s docstring.
+ """
+ import json
++import time
+ import uuid
+ from pathlib import Path
+ 
+@@ -113,12 +119,63 @@ def add_notebook_doc(device_id: str, title: str, pages: list[dict]) -> dict:
+         "title": title,
+         "pages": pages,
+         "page_count": len(pages),
++        "created_at": time.time(),
+     }
+     docs.append(record)
+     _save_all(data)
+     return record
+ 
+ 
++def evict_expired_notebook_docs(ttl_seconds: float) -> list[dict]:
++    """Removes every notebook doc, across every device, whose
++    "created_at" is older than ttl_seconds. Persists the change and
++    returns the removed records (each with "device_id" merged in) so the
++    caller -- main.py's background sweep -- can also drop their
++    vectorstore chunks; this module has no notion of the FAISS index at
++    all (same separation custom_courses.py's docstring describes).
++
++    A record with no "created_at" (saved before this field existed) is
++    always kept, never evicted -- "unknown age" isn't "expired", and
++    guessing an age for old data would risk deleting something still in
++    active use the moment this patch is deployed.
++    """
++    if ttl_seconds <= 0:
++        return []
++    cutoff = time.time() - ttl_seconds
++    data = _load_all()
++    removed: list[dict] = []
++    changed = False
++    for device_id, docs in list(data.items()):
++        keep = []
++        for d in docs:
++            created_at = d.get("created_at")
++            if created_at is not None and created_at < cutoff:
++                removed.append({**d, "device_id": device_id})
++                changed = True
++            else:
++                keep.append(d)
++        if keep:
++            data[device_id] = keep
++        else:
++            data.pop(device_id, None)
++    if changed:
++        _save_all(data)
++    return removed
++
++
++def clear_device_notebook_docs(device_id: str) -> list[dict]:
++    """Removes every notebook doc for one device_id outright -- the
++    manual "delete my data" path (DELETE /me in main.py), for a visitor
++    who doesn't want to wait for the DATA_TTL_HOURS sweep. Returns the
++    removed records so the caller can drop their vectorstore chunks too.
++    """
++    data = _load_all()
++    docs = data.pop(device_id, None) or []
++    if docs:
++        _save_all(data)
++    return docs
++
++
+ def remove_notebook_doc(device_id: str, doc_id: str) -> bool:
+     """Returns True if a document belonging to this device was actually
+     removed. A doc_id that only exists under a *different* device_id is
+diff --git a/frontend/app.js b/frontend/app.js
+index 2e51856..48e0bb5 100644
+--- a/frontend/app.js
++++ b/frontend/app.js
+@@ -85,6 +85,7 @@ const courseList = document.getElementById("courseList");
+ const activeCourseTab = document.getElementById("activeCourseTab");
+ const notebookScopeTab = document.getElementById("notebookScopeTab");
+ const resetBtn = document.getElementById("resetBtn");
++const deleteDataBtn = document.getElementById("deleteDataBtn");
+ 
+ const addCourseBtn = document.getElementById("addCourseBtn");
+ const addCourseForm = document.getElementById("addCourseForm");
+@@ -1210,6 +1211,29 @@ resetBtn.addEventListener("click", async () => {
+   // welcome.js re-inserts a fresh greeting once the thread is cleared.
+ });
+ 
++// Clears this device's entire private notebook plus the current chat/quiz
++// session, server-side, right now -- rather than waiting on the
++// DATA_TTL_HOURS background sweep (see backend/main.py's DELETE /me).
++// Keeps the same deviceId/sessionId afterward (same as Reset conversation
++// above does for sessionId): nothing about either id itself was deleted,
++// they just point at nothing until used again.
++deleteDataBtn.addEventListener("click", async () => {
++  if (!confirm("Delete your notebook uploads and chat history from this device? This can't be undone.")) return;
++  try {
++    const res = await fetch(
++      `${API_BASE}/me?device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`,
++      { method: "DELETE" }
++    );
++    if (!res.ok) throw new Error(`status ${res.status}`);
++  } catch (err) {
++    alert("Couldn't delete your data — is the backend running?");
++    return;
++  }
++  thread.innerHTML = "";
++  // welcome.js re-inserts a fresh greeting once the thread is cleared.
++  loadNotebook();
++});
++
+ // --- Add-a-syllabus panel: tab switching + both submit flows -------------
+ 
+ addCourseBtn.addEventListener("click", () => {
+diff --git a/frontend/index.html b/frontend/index.html
+index c689764..0c34c26 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -90,6 +90,7 @@
+       </form>
+ 
+       <button class="reset-btn" id="resetBtn" type="button">Reset conversation</button>
++      <button class="delete-data-btn" id="deleteDataBtn" type="button">Delete my data</button>
+     </aside>
+ 
+     <div class="rail-resize-handle" id="railResizeHandle" title="Drag to resize"></div>
+diff --git a/frontend/style.css b/frontend/style.css
+index 7a49b0f..a1d046b 100644
+--- a/frontend/style.css
++++ b/frontend/style.css
+@@ -544,6 +544,24 @@ body.rail-collapsed .deck-header {
+   letter-spacing: -0.224px;
+ }
+ 
++/* A quieter, rarer action than Reset -- a plain muted text link rather
++   than a second filled button, so it doesn't visually compete for
++   attention it doesn't need. */
++.delete-data-btn {
++  margin-top: 6px;
++  background: transparent;
++  border: none;
++  color: var(--body-muted);
++  padding: 4px 15px;
++  font-size: 12px;
++  line-height: 1.4;
++  letter-spacing: 0;
++  text-align: left;
++}
++.delete-data-btn:hover {
++  color: var(--body-on-dark);
++}
++
+ /* ---------- Main deck ---------- */
+ .deck {
+   position: relative;

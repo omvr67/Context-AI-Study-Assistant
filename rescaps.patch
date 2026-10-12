@@ -1,0 +1,347 @@
+diff --git a/.env.example b/.env.example
+index 74bd0da..eb24029 100644
+--- a/.env.example
++++ b/.env.example
+@@ -26,3 +26,9 @@ GROQ_API_KEY="your_groq_api_key_here"
+ # defaults (15/minute, 300/day).
+ # RATE_LIMIT_PER_MINUTE="15"
+ # RATE_LIMIT_PER_DAY="300"
++
++# Input/resource caps. Leave unset for the defaults shown here.
++# MAX_MESSAGE_LENGTH="4000"       # characters, per chat message
++# HISTORY_WINDOW_TURNS="20"       # most recent turns kept in a session's prompt
++# NOTEBOOK_MAX_DOCS="5"           # PDFs per device in the private notebook
++# NOTEBOOK_MAX_MB="50"            # total extracted-text size per device
+diff --git a/backend/agent.py b/backend/agent.py
+index 0f8f4ff..8a1c559 100644
+--- a/backend/agent.py
++++ b/backend/agent.py
+@@ -99,12 +99,20 @@ from free-form chat.
+     similar questions" half of the original request. Returns None (main.py
+     turns this into a 422) when the session has no quiz history yet, or
+     hasn't missed anything so far.
++
++v1.4: _history() now trims each session down to its last
++HISTORY_WINDOW_TURNS turns (see backend/config.py) before returning it,
++so a long-running demo session's token usage and latency stay bounded
++instead of resending the entire conversation forever. See
++_trim_history()'s own docstring for why the cut is always exactly on a
++HumanMessage boundary.
+ """
+ import re
+ import time
+ 
+ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+ 
++from .config import HISTORY_WINDOW_TURNS
+ from .models import GeneratedTopicFlashcards, GeneratedTopicQuiz
+ 
+ GUARDRAIL_SYSTEM_PROMPT = """You are the ConnectX Course Syllabus & Exam Assistant -- a sharp, encouraging
+@@ -326,7 +334,42 @@ class SyllabusAssistantAgent:
+     def _history(self, session_id: str) -> list:
+         if session_id not in self._sessions:
+             self._sessions[session_id] = [SystemMessage(content=self.system_prompt)]
+-        return self._sessions[session_id]
++        history = self._sessions[session_id]
++        self._trim_history(history)
++        return history
++
++    @staticmethod
++    def _trim_history(history: list) -> None:
++        """Keeps the system message plus at most the last HISTORY_WINDOW_TURNS
++        turns, mutating `history` in place (so this works whether the
++        caller holds the same list reference as self._sessions[session_id]
++        or looked it up independently).
++
++        A "turn" here is one HumanMessage through to just before the next
++        one (or the end of history) -- everything the student's message
++        triggered, tool calls included. The cut always lands exactly on a
++        HumanMessage boundary, never in the middle of an
++        AIMessage(tool_calls=...) -> ToolMessage sequence, because Groq's
++        (and every OpenAI-style) API requires every tool call to be
++        immediately followed by its matching tool response -- trimming
++        mid-sequence would send a malformed history and the next call
++        would fail outright.
++
++        Called from _history() itself (the only place both chat() and
++        chat_stream() fetch a session's history), so trimming happens once
++        per turn, before that turn's own messages are appended -- which
++        means history can transiently hold one turn more than the window
++        while the current turn is still being processed. That's fine: the
++        goal is bounding long-run growth across many turns, not enforcing
++        a hard ceiling mid-turn.
++        """
++        if HISTORY_WINDOW_TURNS <= 0 or not history:
++            return
++        human_indices = [i for i, m in enumerate(history) if isinstance(m, HumanMessage)]
++        if len(human_indices) <= HISTORY_WINDOW_TURNS:
++            return
++        cut_at = human_indices[-HISTORY_WINDOW_TURNS]
++        history[:] = [history[0]] + history[cut_at:]
+ 
+     def _tools_for_call(self, extra_tools, exclude_tool_names: set[str] | None = None):
+         """Resolves the (bound-LLM, tools_map) pair to use for one call.
+diff --git a/backend/config.py b/backend/config.py
+index 48c8816..7ae3a61 100644
+--- a/backend/config.py
++++ b/backend/config.py
+@@ -82,3 +82,25 @@ ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", ["*"])
+ # meant to catch a bot or a forgotten open tab rather than a person.
+ RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 15)
+ RATE_LIMIT_PER_DAY = _env_int("RATE_LIMIT_PER_DAY", 300)
++
++# --- Input / resource caps --------------------------------------------------
++# A generous ceiling for one chat message -- comfortably more than a real
++# question needs, but bounds how much a single turn can grow the prompt
++# sent to Groq.
++MAX_MESSAGE_LENGTH = _env_int("MAX_MESSAGE_LENGTH", 4000)
++
++# How many of a session's most recent turns (one turn = one student message
++# through the assistant's reply, tool calls included) stay in the prompt
++# sent to the model. Bounds a long-running session's token usage and
++# latency instead of resending the entire conversation forever -- see
++# agent.py's _history(), which is the only place this is read. A "turn" is
++# never split mid tool-call/tool-response pair; see that method's docstring
++# for why that matters.
++HISTORY_WINDOW_TURNS = _env_int("HISTORY_WINDOW_TURNS", 20)
++
++# Per-device cap on the private notebook (see notebook_store.py) -- a demo
++# visitor's browser, not a real account, so these exist to keep one device
++# from growing the shared notebook_docs.json file without bound rather than
++# to model a real product quota.
++NOTEBOOK_MAX_DOCS = _env_int("NOTEBOOK_MAX_DOCS", 5)
++NOTEBOOK_MAX_MB = _env_int("NOTEBOOK_MAX_MB", 50)
+diff --git a/backend/main.py b/backend/main.py
+index d829a92..d437d7a 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -80,9 +80,8 @@ with a default that reproduces pre-v1.4 behavior so an existing local
+ `.env` with just GROQ_API_KEY keeps working unchanged. CORS now reads
+ ALLOWED_ORIGINS instead of a hardcoded wildcard, and the Groq model name
+ is configurable via GROQ_MODEL instead of hardcoded. Later patches in
+-this round (same file, same config module) add: admin-token protection
+-for shared-course writes, input/resource caps, visitor-data TTL eviction,
+-request timeouts/concurrency limits, and structured logging.
++this round (same file, same config module) add: visitor-data TTL
++eviction, request timeouts/concurrency limits, and structured logging.
+ 
+ Admin-token protection (also v1.4): the four shared-course write
+ endpoints (add by text, add by PDF, attach solutions, delete) now call
+@@ -120,6 +119,17 @@ is now a relative "" for exactly that reason. One visible side effect:
+ the old GET "/" health check moved to GET "/health" so "/" is free for
+ index.html; same response shape, nothing else about it changed yet (a
+ later patch in this round fleshes it out further).
++
++Input/resource caps (also v1.4): /chat and /chat/stream now reject a
++message over MAX_MESSAGE_LENGTH (422); agent.py's _history() trims each
++session to its last HISTORY_WINDOW_TURNS turns -- see that method's own
++docstring. Every PDF upload (course and notebook, main doc and
++solutions) now reads through _read_upload_capped instead of a one-shot
++file.read(), so an oversized body is rejected the moment it exceeds
++MAX_PDF_BYTES on the wire rather than after being pulled fully into
++memory first. /notebook/upload additionally checks
++notebook_store.check_notebook_quota (NOTEBOOK_MAX_DOCS / NOTEBOOK_MAX_MB
++per device) before persisting.
+ """
+ import json
+ import os
+@@ -133,7 +143,13 @@ from fastapi.staticfiles import StaticFiles
+ from langchain_groq import ChatGroq
+ 
+ from .agent import FRIENDLY_QUOTA_MESSAGE, SyllabusAssistantAgent, _is_rate_limit_error
+-from .config import ADMIN_TOKEN, ALLOWED_ORIGINS, DEMO_MODE, GROQ_MODEL
++from .config import (
++    ADMIN_TOKEN,
++    ALLOWED_ORIGINS,
++    DEMO_MODE,
++    GROQ_MODEL,
++    MAX_MESSAGE_LENGTH,
++)
+ from .custom_courses import (
+     add_course_solutions,
+     add_custom_course,
+@@ -160,13 +176,15 @@ from .models import (
+     SourceChunk,
+ )
+ from .notebook_store import (
++    NotebookQuotaError,
+     add_doc_solutions,
+     add_notebook_doc,
++    check_notebook_quota,
+     load_all_notebook_docs,
+     load_notebook_docs,
+     remove_notebook_doc,
+ )
+-from .pdf_ingest import PDFValidationError, extract_pdf_pages
++from .pdf_ingest import MAX_PDF_BYTES, PDFValidationError, extract_pdf_pages
+ from .rag import (
+     add_course_solutions_to_vectorstore,
+     add_course_to_vectorstore,
+@@ -338,6 +356,37 @@ def _require_admin(request: Request) -> None:
+         raise HTTPException(status_code=401, detail="Missing or invalid admin token.")
+ 
+ 
++async def _read_upload_capped(file: UploadFile, max_bytes: int = MAX_PDF_BYTES) -> bytes:
++    """Reads an uploaded file in bounded 1 MB chunks, raising 413 the
++    instant the real byte count exceeds max_bytes.
++
++    `await file.read()` (the one-shot version used at every upload site
++    before this) pulls the *entire* body into memory first and only
++    rejects it afterward, via pdf_ingest.py's own MAX_PDF_BYTES check
++    inside validate_pdf_header -- so an oversized upload still costs full
++    memory for however long that takes. A client-declared Content-Length
++    header isn't trusted here either (trivial to omit or understate); this
++    reads real bytes off the wire and stops the moment they exceed the
++    cap, so it's the one check that actually bounds memory regardless of
++    what the request claims about itself.
++    """
++    chunks = []
++    total = 0
++    chunk_size = 1024 * 1024
++    while True:
++        chunk = await file.read(chunk_size)
++        if not chunk:
++            break
++        total += len(chunk)
++        if total > max_bytes:
++            raise HTTPException(
++                status_code=413,
++                detail=f"File is too large (max {max_bytes // (1024 * 1024)} MB).",
++            )
++        chunks.append(chunk)
++    return b"".join(chunks)
++
++
+ def _require_device_id(device_id: str | None) -> str:
+     """Every /notebook endpoint needs a real device_id -- there's no auth
+     system here, so this client-generated id (see frontend/app.js) is the
+@@ -444,7 +493,7 @@ async def upload_course_pdf(
+     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+ 
+-    data = await file.read()
++    data = await _read_upload_capped(file)
+     try:
+         pages = extract_pdf_pages(data)
+     except PDFValidationError as e:
+@@ -518,7 +567,7 @@ async def upload_course_solutions(course_code: str, request: Request, file: Uplo
+     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+ 
+-    data = await file.read()
++    data = await _read_upload_capped(file)
+     try:
+         pages = extract_pdf_pages(data)
+     except PDFValidationError as e:
+@@ -587,12 +636,17 @@ async def upload_notebook_pdf(
+     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+ 
+-    data = await file.read()
++    data = await _read_upload_capped(file)
+     try:
+         pages = extract_pdf_pages(data)
+     except PDFValidationError as e:
+         raise HTTPException(status_code=422, detail=str(e))
+ 
++    try:
++        check_notebook_quota(device_id, pages)
++    except NotebookQuotaError as e:
++        raise HTTPException(status_code=413, detail=str(e))
++
+     saved = add_notebook_doc(device_id, doc_title, pages)
+     notebook_chunk_ids[saved["doc_id"]] = add_notebook_doc_to_vectorstore(
+         vectorstore, device_id, saved["doc_id"], doc_title, pages
+@@ -648,7 +702,7 @@ async def upload_notebook_solutions(
+     if file.content_type not in ("application/pdf", "application/x-pdf") and not filename.endswith(".pdf"):
+         raise HTTPException(status_code=422, detail="Only PDF files are accepted")
+ 
+-    data = await file.read()
++    data = await _read_upload_capped(file)
+     try:
+         pages = extract_pdf_pages(data)
+     except PDFValidationError as e:
+@@ -822,6 +876,8 @@ def _notebook_scope(req: ChatRequest):
+ def chat(req: ChatRequest, request: Request):
+     if not req.message.strip():
+         raise HTTPException(status_code=422, detail="message must not be empty")
++    if len(req.message) > MAX_MESSAGE_LENGTH:
++        raise HTTPException(status_code=422, detail=f"Message is too long (max {MAX_MESSAGE_LENGTH} characters).")
+ 
+     _enforce_rate_limit(request, "messages")
+ 
+@@ -868,6 +924,8 @@ def chat_stream(req: ChatRequest, request: Request):
+     """
+     if not req.message.strip():
+         raise HTTPException(status_code=422, detail="message must not be empty")
++    if len(req.message) > MAX_MESSAGE_LENGTH:
++        raise HTTPException(status_code=422, detail=f"Message is too long (max {MAX_MESSAGE_LENGTH} characters).")
+ 
+     _enforce_rate_limit(request, "messages")
+ 
+diff --git a/backend/notebook_store.py b/backend/notebook_store.py
+index 2974032..eb2dfe3 100644
+--- a/backend/notebook_store.py
++++ b/backend/notebook_store.py
+@@ -16,14 +16,61 @@ Solutions addition: a doc record may also carry a "solutions" key -- the
+ same {"page": int, "text": str} page list shape, from a separate
+ answer-key PDF attached via POST /notebook/{doc_id}/solutions (see main.py
+ and rag.add_notebook_solutions_to_vectorstore).
++
++v1.4: added check_notebook_quota(), a per-device cap (NOTEBOOK_MAX_DOCS /
++NOTEBOOK_MAX_MB, see backend/config.py) that main.py's /notebook/upload
++calls before persisting a new document.
+ """
+ import json
+ import uuid
+ from pathlib import Path
+ 
++from .config import NOTEBOOK_MAX_DOCS, NOTEBOOK_MAX_MB
++
+ STORE_PATH = Path(__file__).parent / "notebook_docs.json"
+ 
+ 
++class NotebookQuotaError(ValueError):
++    """Raised by check_notebook_quota() when adding a document would put a
++    device over NOTEBOOK_MAX_DOCS or NOTEBOOK_MAX_MB (see backend/config.py).
++    main.py catches this and turns it into a 413.
++    """
++
++
++def check_notebook_quota(device_id: str, new_pages: list[dict]) -> None:
++    """Raises NotebookQuotaError if adding a document with `new_pages`
++    would put this device over its per-device notebook quota.
++
++    Measured against extracted text size (what's actually persisted here
++    and what gets embedded), not the original PDF's byte size, which
++    isn't stored in this module at all. Only counts each existing doc's
++    main `pages`, not any attached `solutions` pages -- solutions are an
++    optional add-on to a doc already under quota, not a second upload the
++    quota is meant to gate.
++
++    A demo-scale, per-device-id quota, not a real per-account one: see
++    this module's docstring for why device_id (not a real account) is the
++    scoping key here.
++    """
++    existing = load_notebook_docs(device_id)
++    if len(existing) >= NOTEBOOK_MAX_DOCS:
++        raise NotebookQuotaError(
++            f"Your notebook is at its {NOTEBOOK_MAX_DOCS}-document limit for this demo "
++            "-- remove one before adding another."
++        )
++
++    existing_bytes = sum(
++        len(p.get("text", "").encode("utf-8")) for doc in existing for p in doc.get("pages", [])
++    )
++    new_bytes = sum(len(p.get("text", "").encode("utf-8")) for p in new_pages)
++    max_bytes = NOTEBOOK_MAX_MB * 1024 * 1024
++    if existing_bytes + new_bytes > max_bytes:
++        raise NotebookQuotaError(
++            f"Your notebook is at its {NOTEBOOK_MAX_MB} MB limit for this demo "
++            "-- remove something before adding more."
++        )
++
++
+ def _load_all() -> dict[str, list[dict]]:
+     if not STORE_PATH.exists():
+         return {}

@@ -1,0 +1,284 @@
+diff --git a/.env.example b/.env.example
+index 35d6207..c5ee6f6 100644
+--- a/.env.example
++++ b/.env.example
+@@ -42,3 +42,6 @@ GROQ_API_KEY="your_groq_api_key_here"
+ # LLM_CALL_TIMEOUT_SECONDS="30"   # per Groq HTTP request
+ # MAX_CONCURRENT_LLM_CALLS="6"    # across every visitor combined
+ # LLM_QUEUE_WAIT_SECONDS="10"     # how long a call waits for a free slot
++
++# Log verbosity (DEBUG, INFO, WARNING, ERROR). Leave unset for INFO.
++# LOG_LEVEL="INFO"
+diff --git a/backend/agent.py b/backend/agent.py
+index 6523aa6..aaef7c2 100644
+--- a/backend/agent.py
++++ b/backend/agent.py
+@@ -118,7 +118,8 @@ BUSY_MESSAGE the same way they already turn a 429 into
+ FRIENDLY_QUOTA_MESSAGE (main.py's /flashcards, /quiz, and /retry-quiz do
+ the same, as a 503). The per-request network timeout itself
+ (LLM_CALL_TIMEOUT_SECONDS) is set once, on the ChatGroq client in
+-main.py, not here.
++main.py, not here. llm_calls_in_flight() exposes the live count for
++GET /health.
+ """
+ import re
+ import threading
+@@ -241,6 +242,33 @@ class LLMBusyError(Exception):
+ # not "scheduled on an event loop".
+ _llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+ 
++# An explicit counter, not Semaphore._value (an undocumented CPython
++# implementation detail) -- tracked the same way the semaphore itself is
++# acquired/released, so GET /health can report real-time load
++# (llm_calls_in_flight() below) without depending on internals.
++_in_flight_lock = threading.Lock()
++_in_flight_count = 0
++
++
++def llm_calls_in_flight() -> int:
++    """How many Groq calls are in flight, process-wide, right now. Read by
++    GET /health in main.py for operational visibility during a live demo.
++    """
++    with _in_flight_lock:
++        return _in_flight_count
++
++
++def _track_call_start() -> None:
++    global _in_flight_count
++    with _in_flight_lock:
++        _in_flight_count += 1
++
++
++def _track_call_end() -> None:
++    global _in_flight_count
++    with _in_flight_lock:
++        _in_flight_count -= 1
++
+ 
+ def _is_rate_limit_error(exc: Exception) -> bool:
+     """Detects a 429 from Groq without depending on the exact exception
+@@ -271,6 +299,7 @@ def _invoke_with_backoff(invoke_fn, messages, max_retries: int = _MAX_RETRIES, b
+     """
+     if not _llm_semaphore.acquire(timeout=LLM_QUEUE_WAIT_SECONDS):
+         raise LLMBusyError(BUSY_MESSAGE)
++    _track_call_start()
+     try:
+         last_exc: Exception | None = None
+         for attempt in range(max_retries + 1):
+@@ -283,6 +312,7 @@ def _invoke_with_backoff(invoke_fn, messages, max_retries: int = _MAX_RETRIES, b
+                 time.sleep(base_delay * (2 ** attempt))
+         raise last_exc  # pragma: no cover -- loop above always returns or raises
+     finally:
++        _track_call_end()
+         _llm_semaphore.release()
+ 
+ 
+@@ -302,6 +332,7 @@ def _stream_with_backoff(stream_fn, messages, max_retries: int = _MAX_RETRIES, b
+     """
+     if not _llm_semaphore.acquire(timeout=LLM_QUEUE_WAIT_SECONDS):
+         raise LLMBusyError(BUSY_MESSAGE)
++    _track_call_start()
+     try:
+         attempt = 0
+         while True:
+@@ -317,6 +348,7 @@ def _stream_with_backoff(stream_fn, messages, max_retries: int = _MAX_RETRIES, b
+                 time.sleep(base_delay * (2 ** attempt))
+                 attempt += 1
+     finally:
++        _track_call_end()
+         _llm_semaphore.release()
+ 
+ 
+diff --git a/backend/config.py b/backend/config.py
+index 1acb490..381c1d3 100644
+--- a/backend/config.py
++++ b/backend/config.py
+@@ -129,3 +129,8 @@ LLM_CALL_TIMEOUT_SECONDS = _env_int("LLM_CALL_TIMEOUT_SECONDS", 30)
+ # indefinitely -- degrading politely under load rather than falling over.
+ MAX_CONCURRENT_LLM_CALLS = _env_int("MAX_CONCURRENT_LLM_CALLS", 6)
+ LLM_QUEUE_WAIT_SECONDS = _env_int("LLM_QUEUE_WAIT_SECONDS", 10)
++
++# --- Logging -------------------------------------------------------------
++# Plain text to stdout (see main.py's logging.basicConfig call) -- no file
++# rotation, no JSON formatter; this is a single demo process, not a fleet.
++LOG_LEVEL = (os.environ.get("LOG_LEVEL", "INFO").strip().upper()) or "INFO"
+diff --git a/backend/main.py b/backend/main.py
+index 9ae2432..176ea60 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -150,12 +150,29 @@ LLM_QUEUE_WAIT_SECONDS -- /chat and /chat/stream turn that into a normal
+ assistant-message reply (agent.py's BUSY_MESSAGE), the same way they
+ already do for a 429; /flashcards, /quiz, and /retry-quiz turn it into a
+ 503 here.
++
++Health + logging (also v1.4, closing out this round): logging.basicConfig
++is configured once at import time (LOG_LEVEL, see backend/config.py),
++replacing the sweep's old print() calls with real logger calls and adding
++a few more: once at startup (model/demo_mode/rate-limit/TTL settings, so
++a launch's actual config is visible in the console it's running in), and
++on a rate-limit or admin-check rejection (the client key, never the
++supplied admin token itself). _log_requests is a middleware logging one
++line per request -- method, path, status, duration -- tagged with a
++short request id that's also echoed back as the X-Request-ID response
++header, skipping static assets so the console stays readable during a
++live demo. GET /health now reports uptime, demo_mode, the model in use,
++the live chat-session count, and llm_calls_in_flight() /
++llm_concurrency_limit (see agent.py) for at-a-glance load visibility.
+ """
+ import asyncio
+ import contextlib
+ import json
++import logging
+ import os
+ import secrets
++import time
++import uuid
+ from pathlib import Path
+ 
+ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+@@ -170,6 +187,7 @@ from .agent import (
+     LLMBusyError,
+     SyllabusAssistantAgent,
+     _is_rate_limit_error,
++    llm_calls_in_flight,
+ )
+ from .config import (
+     ADMIN_TOKEN,
+@@ -178,7 +196,11 @@ from .config import (
+     DEMO_MODE,
+     GROQ_MODEL,
+     LLM_CALL_TIMEOUT_SECONDS,
++    LOG_LEVEL,
++    MAX_CONCURRENT_LLM_CALLS,
+     MAX_MESSAGE_LENGTH,
++    RATE_LIMIT_PER_DAY,
++    RATE_LIMIT_PER_MINUTE,
+ )
+ from .custom_courses import (
+     add_course_solutions,
+@@ -229,6 +251,19 @@ from .rag import (
+ from .rate_limit import check_and_increment
+ from .tools import make_notebook_tool, make_tools  # imports functions that create the tools used
+ 
++# ---------------------------------------------------------------------------
++# Logging: plain text to stdout, one line per request (see _log_requests
++# below) plus the handful of explicit logger.* calls scattered through
++# this file (startup, the data-TTL sweep, rate-limit/admin rejections).
++# No file rotation, no JSON formatter, no third-party log shipper -- this
++# is a single demo process, not a fleet; `uvicorn ... 2>&1 | tee demo.log`
++# is enough to keep a copy if the terminal itself isn't enough.
++# ---------------------------------------------------------------------------
++logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
++logger = logging.getLogger("connectx")
++
++_START_TIME = time.monotonic()
++
+ # ---------------------------------------------------------------------------
+ # Startup: build the vector store, tools, and agent once when the app boots.
+ # ---------------------------------------------------------------------------
+@@ -278,6 +313,14 @@ for _device_id, _docs in load_all_notebook_docs().items():
+ tools = make_tools(vectorstore)
+ agent = SyllabusAssistantAgent(llm=llm, tools=tools)
+ 
++logger.info(
++    "ConnectX starting: model=%s demo_mode=%s admin_token_set=%s "
++    "rate_limit=%d/min,%d/day data_ttl=%dh max_concurrent_llm=%d courses_indexed=%d",
++    GROQ_MODEL, DEMO_MODE, ADMIN_TOKEN is not None,
++    RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_DAY, DATA_TTL_HOURS, MAX_CONCURRENT_LLM_CALLS,
++    len(course_chunk_ids),
++)
++
+ BASE_COURSE_CODES = {doc.metadata["course_code"] for doc in SYLLABUS_DOCUMENTS}
+ 
+ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+@@ -316,7 +359,7 @@ def _sweep_expired_data() -> None:
+     for doc in expired_docs:
+         _purge_notebook_doc_index(doc["doc_id"])
+     if evicted_sessions or expired_docs:
+-        print(f"[data-ttl] evicted {evicted_sessions} session(s), {len(expired_docs)} notebook doc(s)")
++        logger.info("data-ttl sweep: evicted %d session(s), %d notebook doc(s)", evicted_sessions, len(expired_docs))
+ 
+ 
+ async def _sweep_loop() -> None:
+@@ -325,7 +368,7 @@ async def _sweep_loop() -> None:
+         try:
+             _sweep_expired_data()
+         except Exception as e:  # a sweep bug should never take the server down
+-            print(f"[data-ttl] sweep failed: {e}")
++            logger.warning("data-ttl sweep failed: %s", e)
+ 
+ 
+ @contextlib.asynccontextmanager
+@@ -356,6 +399,34 @@ app.add_middleware(
+ )
+ 
+ 
++# One access-log line per request, each tagged with a short request id
++# (also echoed back as the X-Request-ID response header, so a specific
++# browser request can be matched to a specific server log line while
++# watching a live demo). Skips static assets (style.css, app.js, the
++# vendored libraries, fonts, ...) served by the StaticFiles mount at the
++# bottom of this file -- every real API route below has no file extension
++# in its path, which is what the check below actually keys on, so this
++# needs no separate list of routes to stay in sync with.
++_STATIC_EXTENSIONS = (".css", ".js", ".html", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2")
++
++
++@app.middleware("http")
++async def _log_requests(request: Request, call_next):
++    if request.url.path.lower().endswith(_STATIC_EXTENSIONS):
++        return await call_next(request)
++
++    request_id = uuid.uuid4().hex[:8]
++    start = time.monotonic()
++    response = await call_next(request)
++    duration_ms = (time.monotonic() - start) * 1000
++    logger.info(
++        "%s %s %s -> %d (%.0fms)",
++        request_id, request.method, request.url.path, response.status_code, duration_ms,
++    )
++    response.headers["X-Request-ID"] = request_id
++    return response
++
++
+ def _course_registry() -> dict[str, dict]:
+     """course_code -> {course_name, custom, source, page_count, has_solutions}
+     for every indexed course, base + custom.
+@@ -420,8 +491,10 @@ def _enforce_rate_limit(request: Request, action: str = "requests") -> None:
+     visitor has exceeded either window; otherwise records the request and
+     returns normally.
+     """
+-    allowed, retry_after = check_and_increment(_client_key(request))
++    key = _client_key(request)
++    allowed, retry_after = check_and_increment(key)
+     if not allowed:
++        logger.warning("rate limit: %s blocked for %ds (%s)", key, retry_after, action)
+         raise HTTPException(
+             status_code=429,
+             detail=f"You're sending {action} a little fast -- please wait {retry_after}s and try again.",
+@@ -448,6 +521,8 @@ def _require_admin(request: Request) -> None:
+         raise HTTPException(status_code=403, detail="Shared-course writes are locked for this demo.")
+     supplied = request.headers.get("x-admin-token", "")
+     if not secrets.compare_digest(supplied, ADMIN_TOKEN):
++        # Never log the supplied value itself -- only that an attempt failed.
++        logger.warning("admin check failed: %s %s from %s", request.method, request.url.path, _client_key(request))
+         raise HTTPException(status_code=401, detail="Missing or invalid admin token.")
+ 
+ 
+@@ -503,10 +578,16 @@ def health_check():
+     return {
+         "status": "ok",
+         "service": "syllabus-exam-assistant",
++        "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
++        "demo_mode": DEMO_MODE,
++        "model": GROQ_MODEL,
+         "courses_indexed": len(course_chunk_ids),
+         "notebook_docs_indexed": len(notebook_chunk_ids),
+         "courses_with_solutions": len(course_solutions_chunk_ids),
+         "notebook_docs_with_solutions": len(notebook_solutions_chunk_ids),
++        "active_chat_sessions": len(agent._sessions),
++        "llm_calls_in_flight": llm_calls_in_flight(),
++        "llm_concurrency_limit": MAX_CONCURRENT_LLM_CALLS,
+     }
+ 
+ 

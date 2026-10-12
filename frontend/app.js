@@ -1,4 +1,11 @@
-const API_BASE = "http://127.0.0.1:8000";
+// v1.4: relative, not a hardcoded http://127.0.0.1:8000. FastAPI now serves
+// this file itself (see backend/main.py's StaticFiles mount), so every
+// fetch(`${API_BASE}/...`) call below resolves against whatever origin the
+// page was actually loaded from -- localhost while developing, the real
+// tunnel/deploy URL once this is shared. That also fixes the public demo
+// outright: a browser won't let an https tunnel page call a plain http
+// API, and a relative URL has no scheme to mismatch.
+const API_BASE = "";
 
 const sessionId = crypto.randomUUID();
 let activeCourse = null; // null = search across all courses
@@ -401,7 +408,7 @@ async function loadCourses() {
       courseList.appendChild(renderChip(course, false));
     }
   } catch (err) {
-    courseList.innerHTML = `<p class="loading">Couldn't reach the backend at ${API_BASE}. Is uvicorn running?</p>`;
+    courseList.innerHTML = `<p class="loading">Couldn't reach the backend. Is uvicorn running?</p>`;
   }
 }
 
@@ -528,7 +535,7 @@ async function loadNotebook() {
       notebookList.appendChild(renderNotebookChip(doc));
     }
   } catch (err) {
-    notebookList.innerHTML = `<p class="loading">Couldn't reach the backend at ${API_BASE}. Is uvicorn running?</p>`;
+    notebookList.innerHTML = `<p class="loading">Couldn't reach the backend. Is uvicorn running?</p>`;
   }
 }
 
